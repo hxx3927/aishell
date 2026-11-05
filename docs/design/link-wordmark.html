@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>AIShell · LINK 字标方案</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        font-family: 'SF Pro Display', 'Segoe UI', 'PingFang SC', sans-serif;
+      }
+      * { box-sizing: border-box; }
+      body { margin: 0; background: #161617; color: #f5f5f7; padding: 28px 32px 40px; }
+      h1 { margin: 0 0 4px; font-size: 18px; font-weight: 600; letter-spacing: 0.01em; }
+      .sub { margin: 0 0 22px; font-size: 12px; color: #8e8e93; }
+
+      .card { margin-bottom: 22px; border-radius: 16px; border: 1px solid #2c2c2e; overflow: hidden; }
+      .card-head { display: flex; align-items: baseline; gap: 10px; padding: 14px 18px 12px; }
+      .card-head .name { font-size: 13px; font-weight: 600; }
+      .card-head .desc { font-size: 11px; color: #8e8e93; }
+
+      .previews { display: grid; grid-template-columns: 1fr 1fr; }
+      .preview { padding: 18px 22px 22px; }
+      .preview.dark { background: #1c1c1e; }
+      .preview.light { background: #ffffff; color: #1d1d1f; }
+      .preview .tag { font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; opacity: 0.45; margin-bottom: 14px; }
+      .row { display: flex; align-items: center; gap: 26px; }
+      .big svg { height: 84px; width: auto; display: block; }
+      .small { display: flex; align-items: center; gap: 10px; }
+      .small svg { height: 22px; width: auto; display: block; }
+
+      /* how it sits in the sidebar header, roughly */
+      .context { display: inline-flex; align-items: center; gap: 8px; padding: 4px 10px 4px 4px; border-radius: 9px; }
+      .context.dark { background: #232325; }
+      .context.light { background: #f2f2f4; }
+    </style>
+  </head>
+  <body>
+    <h1>AIShell · LINK 字标方案</h1>
+    <p class="sub">三种手绘 SVG 字标，均为矢量、随主题换色。顶部为深色主题，底部为浅色主题；右侧是缩到侧栏实际高度（22px）的效果。</p>
+    <div id="app"></div>
+
+    <script>
+      const candidates = [
+        {
+          key: 'chain',
+          name: 'A · 链环连接字',
+          desc: '单线字母，下方一条由互扣圆环组成的渐变链条，把整个字托在一起'
+        },
+        {
+          key: 'net',
+          name: 'B · 网络连线',
+          desc: '单线几何字母，笔画端点即节点，节点之间用细线相连——拓扑网络的感觉'
+        },
+        {
+          key: 'lockup',
+          name: 'C · 链环徽标 + 字',
+          desc: '左侧一枚由两环互扣组成的链环标志，右侧是同一套单线字母，标志用渐变蓝强调'
+        }
+      ]
+
+      const themes = {
+        dark: { ink: '#f5f5f7', g0: '#0a84ff', g1: '#64d2ff', bg: '#1c1c1e', label: '深色' },
+        light: { ink: '#1d1d1f', g0: '#0071e3', g1: '#3fa9f5', bg: '#ffffff', label: '浅色' }
+      }
+
+      // shared letter geometry (viewBox 0 0 186 72, cap line y=16, baseline y=56)
+      const L = 'M12 16 V56 H42'
+      const I = 'M60 16 V56'
+      const N = 'M78 56 V16 L110 56 V16'
+      const K = 'M128 16 V56 M156 16 L128 40 L156 56'
+
+      function chainSvg(t, id) {
+        const start = 19
+        const step = 10
+        const count = 14
+        const ring = (cx, i) => {
+          const mask = i === 0 ? '' : ` mask="url(#mg-${id}-${i})"`
+          return `<ellipse cx="${cx}" cy="64" rx="7" ry="4.4" stroke="url(#gc-${id})" stroke-width="2.4"${mask}/>`
+        }
+        return `
+<svg viewBox="0 0 184 74" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="gc-${id}" gradientUnits="userSpaceOnUse" x1="10" y1="0" x2="176" y2="0">
+      <stop offset="0" stop-color="${t.g0}"/><stop offset="1" stop-color="${t.g1}"/>
+    </linearGradient>
+    ${Array.from({ length: count }, (_, i) =>
+      i === 0
+        ? ''
+        : `<mask id="mg-${id}-${i}"><rect x="-20" y="-20" width="226" height="114" fill="#fff"/><ellipse cx="${
+            start + (i - 1) * step
+          }" cy="64" rx="7" ry="4.4" stroke="#000" stroke-width="3.6"/></mask>`
+    ).join('')}
+  </defs>
+  <g stroke="${t.ink}" stroke-width="8" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M12 16 V56 H42"/>
+    <path d="${I}"/>
+    <path d="${N}"/>
+    <path d="${K}"/>
+  </g>
+  ${Array.from({ length: count }, (_, i) => ring(start + i * step, i)).join('')}
+</svg>`
+      }
+
+      function netSvg(t, id) {
+        const nodes = [
+          [12, 16], [42, 56],
+          [60, 16], [60, 56],
+          [78, 56], [78, 16], [110, 56], [110, 16],
+          [128, 16], [128, 56], [156, 16], [156, 56]
+        ]
+        return `
+<svg viewBox="0 0 186 72" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="gn-${id}" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="${t.g0}"/><stop offset="1" stop-color="${t.g1}"/>
+    </linearGradient>
+  </defs>
+  <g stroke="url(#gn-${id})" stroke-width="1.6" opacity=".55">
+    <path d="M42 56 H78"/>
+    <path d="M60 16 H78"/>
+    <path d="M110 16 H128"/>
+    <path d="M110 56 H128"/>
+  </g>
+  <g stroke="${t.ink}" stroke-width="8" stroke-linecap="round" stroke-linejoin="round">
+    <path d="${L}"/><path d="${I}"/><path d="${N}"/><path d="${K}"/>
+  </g>
+  <g fill="url(#gn-${id})">
+    ${nodes.map(([x, y]) => `<circle cx="${x}" cy="${y}" r="2.6"/>`).join('')}
+  </g>
+</svg>`
+      }
+
+      // lockup: interlocking-ring badge on the left + monoline wordmark
+      function lockupSvg(t, id) {
+        return `
+<svg viewBox="0 0 232 72" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="gl-${id}" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="${t.g0}"/><stop offset="1" stop-color="${t.g1}"/>
+    </linearGradient>
+    <mask id="ml-${id}">
+      <rect x="-20" y="-20" width="272" height="112" fill="#fff"/>
+      <ellipse cx="15" cy="36" rx="9" ry="6.5" stroke="#000" stroke-width="9"/>
+    </mask>
+  </defs>
+  <ellipse cx="27" cy="36" rx="9" ry="6.5" stroke="url(#gl-${id})" stroke-width="4.6" mask="url(#ml-${id})"/>
+  <ellipse cx="15" cy="36" rx="9" ry="6.5" stroke="url(#gl-${id})" stroke-width="4.6"/>
+  <g stroke="${t.ink}" stroke-width="7.5" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M66 16 V56 H94"/>
+    <path d="M111 16 V56"/>
+    <path d="M128 56 V16 L158 56 V16"/>
+    <path d="M175 16 V56"/>
+    <path d="M202 16 L175 40 L202 56"/>
+  </g>
+</svg>`
+      }
+
+      const renderers = { chain: chainSvg, net: netSvg, lockup: lockupSvg }
+
+      const app = document.getElementById('app')
+      app.innerHTML = candidates
+        .map((c, ci) => {
+          const previews = ['dark', 'light']
+            .map((mode) => {
+              const t = themes[mode]
+              const id = `${c.key}-${mode}-${ci}`
+              const svg = renderers[c.key](t, id)
+              const ctxId = `${id}-ctx`
+              return `
+              <div class="preview ${mode}">
+                <div class="tag">${t.label}主题</div>
+                <div class="row">
+                  <div class="big">${renderers[c.key](t, id)}</div>
+                  <div class="small">${renderers[c.key](t, ctxId)}</div>
+                </div>
+              </div>`
+            })
+            .join('')
+          return `
+          <section class="card">
+            <div class="card-head"><span class="name">${c.name}</span><span class="desc">${c.desc}</span></div>
+            <div class="previews">${previews}</div>
+          </section>`
+        })
+        .join('')
+    </script>
+  </body>
+</html>

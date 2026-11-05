@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>AIShell app icon candidates</title>
+    <style>
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        padding: 28px 32px 36px;
+        background: #f5f5f7;
+        color: #1d1d1f;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
+          'Microsoft YaHei', system-ui, sans-serif;
+      }
+      h1 { font-size: 17px; margin: 0 0 4px; }
+      .sub { font-size: 12px; color: #6e6e73; margin: 0 0 20px; }
+      .grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 14px; }
+      .card {
+        background: #fff;
+        border: 1px solid #e5e5ea;
+        border-radius: 14px;
+        padding: 14px 14px 18px;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 16px;
+      }
+      .card h2 { align-self: flex-start; font-size: 12px; margin: 0; font-weight: 600; }
+      .card h2 small { display: block; font-weight: 400; color: #6e6e73; font-size: 10px; margin-top: 3px; }
+      .sizes { display: flex; align-items: flex-end; gap: 18px; }
+      .item { display: flex; flex-direction: column; align-items: center; gap: 6px; }
+      .item span { font-size: 9px; color: #a1a1a6; }
+      .tile { display: flex; align-items: center; justify-content: center; color: #fff; }
+      .bare { display: flex; align-items: center; justify-content: center; }
+      .t96 { width: 96px; height: 96px; border-radius: 24px; box-shadow: 0 8px 20px rgba(0, 113, 227, 0.18); }
+      .t48 { width: 48px; height: 48px; border-radius: 12px; box-shadow: 0 4px 10px rgba(0, 113, 227, 0.16); }
+      .t24 { width: 24px; height: 24px; border-radius: 6px; box-shadow: 0 2px 5px rgba(0, 113, 227, 0.14); }
+      .b96 { width: 96px; height: 96px; }
+      .b48 { width: 48px; height: 48px; }
+      .b24 { width: 24px; height: 24px; }
+      .note { font-size: 10px; color: #6e6e73; line-height: 1.6; text-align: left; align-self: stretch; }
+    </style>
+  </head>
+  <body>
+    <h1>AIShell 图标候选</h1>
+    <p class="sub">96 / 48 / 24 px 三种尺寸的真实观感。A 是当前实现，其余为改动方向。</p>
+    <div class="grid" id="grid"></div>
+
+    <script>
+      const GRAD_LINK = ['#0071e3', '#3fa9f5']
+      const TILE_ACCENT = 'linear-gradient(135deg, #0071e3, #5856d6)'
+      const TILE_LINK = `linear-gradient(135deg, ${GRAD_LINK[0]}, ${GRAD_LINK[1]})`
+
+      let n = 0
+      function rings(o) {
+        const id = `m${++n}`
+        const gradId = `g${n}`
+        const { vb, cx1, cx2, cy, rx, ry, sw, mw, rot, cx0, stroke } = o
+        const isGrad = stroke === 'grad'
+        const paint = isGrad ? `url(#${gradId})` : 'currentColor'
+        const body = `
+          <ellipse cx="${cx2}" cy="${cy}" rx="${rx}" ry="${ry}" fill="none" stroke="${paint}" stroke-width="${sw}" mask="url(#${id})"/>
+          <ellipse cx="${cx1}" cy="${cy}" rx="${rx}" ry="${ry}" fill="none" stroke="${paint}" stroke-width="${sw}"/>`
+        const g = rot ? `<g transform="rotate(${rot} ${cx0} ${cy})">${body}</g>` : body
+        return `<svg viewBox="${vb}" fill="none" overflow="visible"><defs>
+          <mask id="${id}"><rect x="-100" y="-100" width="400" height="400" fill="#fff"/>
+            <ellipse cx="${cx1}" cy="${cy}" rx="${rx}" ry="${ry}" fill="none" stroke="#000" stroke-width="${mw}"/></mask>
+          ${isGrad ? `<linearGradient id="${gradId}" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="${GRAD_LINK[0]}"/><stop offset="1" stop-color="${GRAD_LINK[1]}"/></linearGradient>` : ''}
+        </defs>${g}</svg>`
+      }
+
+      const candidates = [
+        {
+          key: 'A',
+          title: 'A · 当前实现',
+          sub: '白环放大版',
+          tile: TILE_ACCENT,
+          mark: { vb: '0 0 40 24', cx1: 12.5, cx2: 23.5, cy: 12, rx: 8, ry: 5.6, sw: 4.4, mw: 5.6, stroke: 'currentColor' },
+          note: '把字标里为 5–10px 设计的小徽标直接放大，环扁、缝窄。'
+        },
+        {
+          key: 'B',
+          title: 'B · 正圆白环',
+          sub: '更圆的环 + 更清晰的交叠缝',
+          tile: TILE_ACCENT,
+          mark: { vb: '0 0 44 28', cx1: 14.75, cx2: 29.25, cy: 14, rx: 9.5, ry: 8, sw: 4.2, mw: 5.8, stroke: 'currentColor' },
+          note: '环接近正圆、交叠约 1/4，留出均匀细缝。'
+        },
+        {
+          key: 'C',
+          title: 'C · 斜置链环',
+          sub: '方形构图，填满图标',
+          tile: TILE_ACCENT,
+          mark: { vb: '0 0 44 44', cx1: 15, cx2: 29, cy: 22, rx: 9.5, ry: 8, sw: 4.2, mw: 5.8, rot: -32, cx0: 22, stroke: 'currentColor' },
+          note: '整体旋转 32°，在方块里重心居中，最像“链”。'
+        },
+        {
+          key: 'D',
+          title: 'D · 蓝青底 + 白环',
+          sub: '底色改成字标的蓝→青',
+          tile: TILE_LINK,
+          mark: { vb: '0 0 44 28', cx1: 14.75, cx2: 29.25, cy: 14, rx: 9.5, ry: 8, sw: 4.2, mw: 5.8, stroke: 'currentColor' },
+          note: '形状同 B，只把方块渐变换成和 LINK 字标一致的蓝→青。'
+        },
+        {
+          key: 'E',
+          title: 'E · 无底色渐变环',
+          sub: '与字标完全同一枚徽标',
+          tile: null,
+          mark: { vb: '3 27 34 18', cx1: 15, cx2: 27, cy: 36, rx: 9, ry: 6.5, sw: 4.6, mw: 9, stroke: 'grad' },
+          note: '去掉方块底，直接放大字标徽标（蓝→青渐变）。'
+        }
+      ]
+
+      function tileSvg(c, size) {
+        const scale = { t96: 0.65, t48: 0.65, t24: 0.7 }[`t${size}`]
+        const markW = Math.round(size * scale)
+        const inner = rings(c.mark).replace('<svg', `<svg style="width:${markW}px;height:auto"`)
+        const cls = c.tile ? 'tile' : 'bare'
+        const bg = c.tile ? `style="background:${c.tile}"` : ''
+        return `<div class="${cls} ${c.tile ? 't' : 'b'}${size}" ${bg}>${inner}</div>`
+      }
+
+      document.getElementById('grid').innerHTML = candidates
+        .map(
+          (c) => `<div class="card">
+            <h2>${c.title}<small>${c.sub}</small></h2>
+            <div class="sizes">
+              <div class="item">${tileSvg(c, 96)}<span>96</span></div>
+              <div class="item">${tileSvg(c, 48)}<span>48</span></div>
+              <div class="item">${tileSvg(c, 24)}<span>24</span></div>
+            </div>
+            <div class="note">${c.note}</div>
+          </div>`
+        )
+        .join('')
+    </script>
+  </body>
+</html>

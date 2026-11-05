@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>AIShell 图标尺寸检查</title>
+    <style>
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        padding: 24px 28px;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
+          'Microsoft YaHei', system-ui, sans-serif;
+        color: #1d1d1f;
+        background:
+          repeating-conic-gradient(#e9e9ee 0% 25%, #fafafa 0% 50%) 50% / 20px 20px;
+      }
+      h1 { font-size: 15px; margin: 0 0 4px; }
+      p { font-size: 11px; color: #6e6e73; margin: 0 0 18px; }
+      .panel {
+        background: rgba(255, 255, 255, 0.86);
+        border: 1px solid #e5e5ea;
+        border-radius: 12px;
+        padding: 16px 18px;
+        margin-bottom: 16px;
+        display: flex;
+        align-items: flex-end;
+        gap: 22px;
+      }
+      .item { display: flex; flex-direction: column; align-items: center; gap: 6px; }
+      .item span { font-size: 10px; color: #6e6e73; }
+      .zoom img { image-rendering: pixelated; }
+      .zoom.s16 img { width: 128px; height: 128px; }
+      .zoom.s24 img { width: 144px; height: 144px; }
+      .zoom.s32 img { width: 160px; height: 160px; }
+      .zoom.s48 img { width: 144px; height: 144px; }
+    </style>
+  </head>
+  <body>
+    <h1>图标尺寸检查（透明底棋盘格）</h1>
+    <p>第一行是任务栏/资源管理器实际使用的尺寸，第二行放大看像素边缘。</p>
+    <div class="panel">
+      <div class="item"><img src="../build/icons/icon-16.png" width="16" height="16" /><span>16</span></div>
+      <div class="item"><img src="../build/icons/icon-24.png" width="24" height="24" /><span>24</span></div>
+      <div class="item"><img src="../build/icons/icon-32.png" width="32" height="32" /><span>32</span></div>
+      <div class="item"><img src="../build/icons/icon-48.png" width="48" height="48" /><span>48</span></div>
+      <div class="item"><img src="../build/icons/icon-64.png" width="64" height="64" /><span>64</span></div>
+      <div class="item"><img src="../build/icons/icon-128.png" width="128" height="128" /><span>128</span></div>
+      <div class="item"><img src="../build/icons/icon-256.png" width="256" height="256" /><span>256</span></div>
+    </div>
+    <div class="panel">
+      <div class="item zoom s16"><img src="../build/icons/icon-16.png" /><span>16 放大 8x</span></div>
+      <div class="item zoom s24"><img src="../build/icons/icon-24.png" /><span>24 放大 6x</span></div>
+      <div class="item zoom s32"><img src="../build/icons/icon-32.png" /><span>32 放大 5x</span></div>
+      <div class="item zoom s48"><img src="../build/icons/icon-48.png" /><span>48 放大 3x</span></div>
+    </div>
+  </body>
+</html>

@@ -1,0 +1,24 @@
+# Dependencies
+node_modules/
+
+# Build output
+out/
+release/
+dist/
+
+# TypeScript incremental build info
+*.tsbuildinfo
+
+# Local test artifacts
+scripts/.tmp-*
+scripts/.mock-ssh-host-key
+scripts/shots/
+
+# Logs and OS files
+*.log
+.DS_Store
+Thumbs.db
+
+# Local environment
+.env
+.env.*

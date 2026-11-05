@@ -1,0 +1,196 @@
+@import 'tailwindcss';
+@import '@xterm/xterm/css/xterm.css';
+
+@theme {
+  /* Apple dark */
+  --color-base: #161617;
+  --color-panel: #1c1c1e;
+  --color-panel-2: #232325;
+  --color-panel-3: #2c2c2e;
+  --color-segment: #3a3a3c;
+  --color-field: #121213;
+  --color-line: #2c2c2e;
+  --color-line-2: #3a3a3c;
+  --color-ink: #f5f5f7;
+  --color-dim: #a1a1a6;
+  --color-faint: #6e6e73;
+  --color-accent: #0a84ff;
+  --color-accent-2: #5e5ce6;
+  --color-ok: #30d158;
+  --color-warn: #ffd60a;
+  --color-err: #ff453a;
+}
+
+:root {
+  /* LINK wordmark gradient */
+  --logo-from: #0a84ff;
+  --logo-to: #64d2ff;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+html {
+  background: var(--color-base);
+  color-scheme: dark;
+}
+
+html[data-theme='light'] {
+  /* Apple light */
+  --color-base: #f5f5f7;
+  --color-panel: #ffffff;
+  --color-panel-2: #f2f2f7;
+  --color-panel-3: #e8e8ed;
+  --color-segment: #ffffff;
+  --color-field: #f2f2f7;
+  --color-line: #e5e5ea;
+  --color-line-2: #d2d2d7;
+  --color-ink: #1d1d1f;
+  --color-dim: #6e6e73;
+  --color-faint: #a1a1a6;
+  --color-accent: #0071e3;
+  --color-accent-2: #5856d6;
+  --color-ok: #248a3d;
+  --color-warn: #b25000;
+  --color-err: #d70015;
+  --logo-from: #0071e3;
+  --logo-to: #3fa9f5;
+  color-scheme: light;
+}
+
+body {
+  margin: 0;
+  background: var(--color-base);
+  color: var(--color-ink);
+  font-family:
+    -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI Variable Text',
+    'Segoe UI', 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif;
+  font-size: 13px;
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+::selection {
+  background: color-mix(in srgb, var(--color-accent) 26%, transparent);
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--color-line-2);
+  border-radius: 8px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-faint);
+  background-clip: content-box;
+}
+
+.drag-region {
+  -webkit-app-region: drag;
+}
+
+.no-drag {
+  -webkit-app-region: no-drag;
+}
+
+.xterm .xterm-viewport {
+  background-color: transparent !important;
+}
+
+.xterm {
+  padding: 8px 10px;
+}
+
+.xterm .xterm-screen canvas {
+  image-rendering: auto;
+}
+
+@layer components {
+  .btn-primary {
+    @apply inline-flex items-center justify-center gap-1.5 rounded-lg bg-accent px-3 py-1.5 text-xs font-semibold text-white shadow-sm transition hover:brightness-110 active:brightness-95 disabled:cursor-not-allowed disabled:opacity-40;
+  }
+
+  .btn-secondary {
+    @apply inline-flex items-center justify-center gap-1.5 rounded-lg border border-line-2 bg-panel-2 px-3 py-1.5 text-xs text-ink transition hover:bg-panel-3 disabled:cursor-not-allowed disabled:opacity-40;
+  }
+
+  .btn-danger {
+    @apply inline-flex items-center justify-center gap-1.5 rounded-lg bg-err/90 px-3 py-1.5 text-xs font-semibold text-white shadow-sm transition hover:bg-err disabled:cursor-not-allowed disabled:opacity-40;
+  }
+
+  .btn-ghost {
+    @apply inline-flex items-center justify-center gap-1.5 rounded-lg px-2 py-1.5 text-xs text-dim transition hover:bg-panel-3 hover:text-ink disabled:cursor-not-allowed disabled:opacity-40;
+  }
+
+  .icon-btn {
+    @apply inline-flex h-7 w-7 items-center justify-center rounded-lg text-dim transition hover:bg-panel-3 hover:text-ink disabled:cursor-not-allowed disabled:opacity-40;
+  }
+
+  .input {
+    @apply w-full rounded-lg border border-line-2 bg-field px-3 py-1.5 text-xs text-ink outline-none transition placeholder:text-faint focus:border-accent/60 focus:ring-2 focus:ring-accent/15;
+  }
+
+  .label {
+    @apply mb-1.5 block text-[11px] font-medium uppercase tracking-wide text-dim;
+  }
+
+  .chip {
+    @apply inline-flex items-center gap-1 rounded-full border border-line-2 bg-panel-2 px-2 py-0.5 text-[10px] text-dim;
+  }
+}
+
+@keyframes aishell-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+.pulse-dot {
+  animation: aishell-pulse 1.6s ease-in-out infinite;
+}
+
+.cm-editor {
+  height: 100%;
+  font-size: inherit;
+}
+
+.cm-scroller {
+  font-family: 'JetBrains Mono', 'Cascadia Code', Consolas, monospace !important;
+  line-height: 1.55 !important;
+}
+
+@keyframes aishell-slide-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.slide-in {
+  animation: aishell-slide-in 0.16s ease-out;
+}

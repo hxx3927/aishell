@@ -436,8 +436,9 @@ monitor.start
 ### 5.1 模块
 
 ```
-src/main/monitor/MonitorService.ts   轮询、速率、历史环形缓冲、退避、生命周期
+src/main/monitor/MonitorService.ts   轮询、退避、生命周期
 src/main/monitor/parse.ts            纯解析函数，便于单测
+src/main/monitor/compute.ts          速率、CPU% 与 top-N 计算，纯函数
 src/shared/types.ts                  MonitorHost / MonitorSample / MonitorEvent
 src/shared/api.ts                    monitor.start / stop / pause / sampleNow / history
 src/main/ipc.ts                      IPC handler
@@ -451,6 +452,7 @@ src/renderer/src/components/TabBar.tsx
 src/renderer/src/components/Sidebar.tsx
 scripts/mock-ssh-server.mjs          返回可波动的模拟指标
 scripts/test-monitor-parse.mts       解析器测试
+scripts/test-monitor-compute.mts     速率与进程计算测试
 ```
 
 ### 5.2 IPC
@@ -528,6 +530,7 @@ interface MonitorState {
 
 - [x] `npm run typecheck`、`npm run build` 通过；
 - [x] 解析器测试覆盖 Ubuntu/容器样本、`df` 多挂载/含空格挂载点、容器挂载标记、线程/句柄/频率、已提交内存、`/proc/diskstats` 过滤与字段映射、链路速度、进程行、NVIDIA/AMD GPU、能力探测、非 Linux 拒绝（41 项断言）；
+- [x] 计算测试覆盖首样本零速率、计数器回绕、扇区转字节、活跃率上限、CPU tick 差分与舍入、top-N 并集、采样间隙后基线清空、历史裁剪（33 项断言）；
 - [x] mock 服务器上四项 KPI、四个详情页签、文件系统表都有数据且随时间变化；
 - [x] 详情页签切换、KPI 卡点选联动、CPU 逐核网格、内存构成条、磁盘逐设备 I/O 表、网络接口切换均正常；
 - [x] 网络卡默认选物理接口 `eth0`，不再出现 `docker0 · 0 B/s`；切换到虚拟接口后卡片与图表同步，并标注「虚拟」；

@@ -1,14 +1,15 @@
-import type {
-  MonitorDiskIo,
-  MonitorEvent,
-  MonitorHost,
-  MonitorNet,
-  MonitorProcess,
-  MonitorSample,
-  MonitorStartResult
-} from '@shared/types'
+import type { MonitorEvent, MonitorHost, MonitorSample, MonitorStartResult } from '@shared/types'
 import { monitorConnId } from '@shared/monitor'
 import type { SshManager } from '../ssh/SshManager'
+import {
+  appendHistory,
+  computeDiskIo,
+  computeNetCounters,
+  computeProcesses,
+  type DiskBaseline,
+  type NetBaseline,
+  type ProcBaseline
+} from './compute'
 import { parseCaps, parseHostProbe, parseProbe, type ParsedProbe } from './parse'
 
 const HISTORY_LIMIT = 450
@@ -60,21 +61,6 @@ echo @@uptime; cut -d" " -f1 /proc/uptime
 echo @@caps; echo clk:$(getconf CLK_TCK 2>/dev/null || echo 100); echo page:$(getconf PAGESIZE 2>/dev/null || echo 4096); command -v nvidia-smi >/dev/null 2>&1 && echo gpu:nvidia
 '`
 
-interface NetBaseline {
-  rx: number
-  tx: number
-  ts: number
-}
-
-interface DiskBaseline {
-  reads: number
-  writes: number
-  sectorsRead: number
-  sectorsWritten: number
-  ioMs: number
-  ts: number
-}
-
 interface Entry {
   sessionId: string
   /** The monitor's own connection; it never shares a terminal's transport. */
@@ -88,7 +74,7 @@ interface Entry {
   history: MonitorSample[]
   netPrev: Map<string, NetBaseline>
   diskPrev: Map<string, DiskBaseline>
-  procPrev: Map<number, { ticks: number; ts: number }>
+  procPrev: Map<number, ProcBaseline>
   /** Host facts needed to turn process ticks into CPU% and RSS into bytes. */
   clockTicks: number
   pageSize: number
@@ -284,10 +270,7 @@ export class MonitorService {
       })
       const parsed = parseProbe(result.stdout)
       const sample = this.toSample(entry, parsed)
-      entry.history.push(sample)
-      if (entry.history.length > HISTORY_LIMIT) {
-        entry.history.splice(0, entry.history.length - HISTORY_LIMIT)
-      }
+      appendHistory(entry.history, sample, HISTORY_LIMIT)
       entry.failures = 0
       entry.lastError = undefined
       entry.host = this.mergeHost(entry, parsed, sample)
@@ -316,66 +299,21 @@ export class MonitorService {
 
   private toSample(entry: Entry, parsed: ParsedProbe): MonitorSample {
     const ts = Date.now()
-    const net: MonitorNet[] = parsed.net.map((counter) => {
-      const previous = entry.netPrev.get(counter.iface)
-      const seconds = previous ? Math.max(0.001, (ts - previous.ts) / 1000) : 0
-      // A counter can wrap or reset; a negative delta is not traffic.
-      const rxDelta =
-        previous && counter.rxBytes >= previous.rx ? counter.rxBytes - previous.rx : 0
-      const txDelta =
-        previous && counter.txBytes >= previous.tx ? counter.txBytes - previous.tx : 0
-      return {
-        iface: counter.iface,
-        rxBps: seconds ? rxDelta / seconds : 0,
-        txBps: seconds ? txDelta / seconds : 0,
-        rxBytes: counter.rxBytes,
-        txBytes: counter.txBytes,
-        speedBps: parsed.links.get(counter.iface)
-      }
-    })
-    entry.netPrev = new Map(
-      parsed.net.map((counter) => [
-        counter.iface,
-        { rx: counter.rxBytes, tx: counter.txBytes, ts }
-      ])
+    const netSample = computeNetCounters(parsed.net, parsed.links, entry.netPrev, ts)
+    entry.netPrev = netSample.next
+    const diskSample = computeDiskIo(parsed.diskIo, entry.diskPrev, ts)
+    entry.diskPrev = diskSample.next
+    const procSample = computeProcesses(
+      parsed.procStat,
+      entry.procPrev,
+      ts,
+      entry.clockTicks,
+      entry.pageSize
     )
-
-    const diskIo: MonitorDiskIo[] = parsed.diskIo.map((counter) => {
-      const previous = entry.diskPrev.get(counter.dev)
-      const seconds = previous ? Math.max(0.001, (ts - previous.ts) / 1000) : 0
-      const delta = (current: number, before: number | undefined): number =>
-        previous && before !== undefined && current >= before ? current - before : 0
-      const readDelta = delta(counter.sectorsRead, previous?.sectorsRead)
-      const writeDelta = delta(counter.sectorsWritten, previous?.sectorsWritten)
-      const ops =
-        delta(counter.reads, previous?.reads) + delta(counter.writes, previous?.writes)
-      const busyMs = delta(counter.ioMs, previous?.ioMs)
-      return {
-        dev: counter.dev,
-        // /proc/diskstats counts 512-byte sectors regardless of the real
-        // block size.
-        readBps: seconds ? (readDelta * 512) / seconds : 0,
-        writeBps: seconds ? (writeDelta * 512) / seconds : 0,
-        iops: seconds ? ops / seconds : 0,
-        activePct: seconds ? Math.min(100, (busyMs / (seconds * 1000)) * 100) : 0,
-        awaitMs: ops > 0 ? busyMs / ops : 0
-      }
-    })
-    entry.diskPrev = new Map(
-      parsed.diskIo.map((counter) => [
-        counter.dev,
-        {
-          reads: counter.reads,
-          writes: counter.writes,
-          sectorsRead: counter.sectorsRead,
-          sectorsWritten: counter.sectorsWritten,
-          ioMs: counter.ioMs,
-          ts
-        }
-      ])
-    )
-
-    const processes = this.toProcesses(entry, parsed, ts)
+    entry.procPrev = procSample.next
+    const net = netSample.items
+    const diskIo = diskSample.items
+    const processes = procSample.items
     const memTotal = parsed.memory.totalBytes || entry.host?.totalMemBytes || 0
     return {
       sessionId: entry.sessionId,
@@ -403,50 +341,6 @@ export class MonitorService {
       gpus: parsed.gpus.length ? parsed.gpus : undefined,
       processes
     }
-  }
-
-  /**
-   * Keeps the union of the top processes by CPU and by memory. CPU% comes from
-   * tick deltas between samples, which is what "currently busy" means; `ps`
-   * reports a lifetime average instead. A process seen for the first time has
-   * no baseline yet, so its first reading is 0.
-   */
-  private toProcesses(
-    entry: Entry,
-    parsed: ParsedProbe,
-    ts: number
-  ): MonitorProcess[] | undefined {
-    if (!parsed.procStat.length) return undefined
-    const next = new Map<number, { ticks: number; ts: number }>()
-    const rows: MonitorProcess[] = []
-    for (const proc of parsed.procStat) {
-      const previous = entry.procPrev.get(proc.pid)
-      next.set(proc.pid, { ticks: proc.ticks, ts })
-      const seconds = previous ? (ts - previous.ts) / 1000 : 0
-      const ticks =
-        previous && proc.ticks >= previous.ticks ? proc.ticks - previous.ticks : 0
-      const cpuPct =
-        seconds > 0 ? (ticks / Math.max(1, entry.clockTicks) / seconds) * 100 : 0
-      rows.push({
-        pid: proc.pid,
-        name: proc.name,
-        cpuPct: Math.round(cpuPct * 10) / 10,
-        memBytes: proc.rssPages * entry.pageSize
-      })
-    }
-    entry.procPrev = next
-
-    const picked = new Map<number, MonitorProcess>()
-    for (const row of [...rows].sort((a, b) => b.cpuPct - a.cpuPct).slice(0, 8)) {
-      picked.set(row.pid, row)
-    }
-    for (const row of [...rows].sort((a, b) => b.memBytes - a.memBytes).slice(0, 8)) {
-      picked.set(row.pid, row)
-    }
-    if (!picked.size) return undefined
-    return [...picked.values()].sort(
-      (a, b) => b.cpuPct - a.cpuPct || b.memBytes - a.memBytes
-    )
   }
 
   private mergeHost(entry: Entry, parsed: ParsedProbe, sample: MonitorSample): MonitorHost {

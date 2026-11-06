@@ -1,18 +1,79 @@
 /**
  * Exercises AgentShell (sentinel protocol) and the redaction rules against
- * the mock SSH server, without Electron.
+ * the mock SSH server, without Electron. The server is started on a free
+ * port for the run; set MOCK_SSH_PORT to reuse an already-running one.
  *
- *   MOCK_SSH_PORT=2299 node scripts/mock-ssh-server.mjs
  *   npx esbuild scripts/test-agent-shell.mts \
  *     --bundle --platform=node --format=esm --external:ssh2 \
- *     --outfile=scripts/.tmp-test.mjs
- *   MOCK_SSH_PORT=2299 node scripts/.tmp-test.mjs
+ *     --outfile=scripts/.tmp-agent-shell.mjs
+ *   node scripts/.tmp-agent-shell.mjs
  */
+import { spawn } from 'node:child_process'
+import { createServer } from 'node:net'
+import { fileURLToPath } from 'node:url'
 import ssh2 from 'ssh2'
 import { AgentShell } from '../src/main/ssh/AgentShell.ts'
 import { redactText, clipOutput } from '../src/main/audit/redact.ts'
 
-const port = Number(process.env.MOCK_SSH_PORT || 2222)
+function freePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const server = createServer()
+    server.once('error', reject)
+    server.listen(0, '127.0.0.1', () => {
+      const address = server.address()
+      const port = typeof address === 'object' && address ? address.port : 0
+      server.close(() => resolve(port))
+    })
+  })
+}
+
+async function startMockServer(): Promise<{ port: number; stop: () => void }> {
+  const port = await freePort()
+  const script = fileURLToPath(new URL('./mock-ssh-server.mjs', import.meta.url))
+  const child = spawn(process.execPath, [script], {
+    env: { ...process.env, MOCK_SSH_PORT: String(port) },
+    stdio: ['ignore', 'pipe', 'pipe']
+  })
+  let stderr = ''
+  child.stderr.on('data', (chunk) => {
+    stderr += String(chunk)
+  })
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      child.kill()
+      reject(new Error(`mock SSH server did not start in 15s${stderr ? `\n${stderr}` : ''}`))
+    }, 15_000)
+    let stdout = ''
+    child.stdout.on('data', (chunk) => {
+      stdout += String(chunk)
+      if (stdout.includes('SSH server ready')) {
+        clearTimeout(timer)
+        resolve()
+      }
+    })
+    child.once('error', (err) => {
+      clearTimeout(timer)
+      reject(err)
+    })
+    child.once('exit', (code) => {
+      clearTimeout(timer)
+      reject(
+        new Error(
+          `mock SSH server exited early (${code})${stderr ? `\n${stderr}` : ''}`
+        )
+      )
+    })
+  })
+  return { port, stop: () => child.kill() }
+}
+
+const externalPort = process.env.MOCK_SSH_PORT ? Number(process.env.MOCK_SSH_PORT) : undefined
+const mock = externalPort
+  ? { port: externalPort, stop: (): void => {} }
+  : await startMockServer()
+process.on('exit', () => mock.stop())
+const port = mock.port
+
 const results: Array<{ name: string; ok: boolean; detail?: unknown }> = []
 const check = (name: string, ok: boolean, detail?: unknown): void => {
   results.push({ name, ok, detail: ok ? undefined : detail })

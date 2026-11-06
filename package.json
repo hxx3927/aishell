@@ -14,9 +14,12 @@
     "typecheck": "npm run typecheck:node && npm run typecheck:web",
     "build:win": "npm run typecheck && electron-vite build && electron-builder --win",
     "mock:ssh": "node scripts/mock-ssh-server.mjs",
-    "test": "npm run test:audit && npm run test:monitor",
+    "test": "npm run test:audit && npm run test:monitor && npm run test:monitor-compute && npm run test:agent-shell && npm run test:agent-shell-bash",
     "test:audit": "esbuild scripts/test-audit-store.mts --bundle --platform=node --format=cjs --external:electron --outfile=scripts/.tmp-audit-store.cjs && node scripts/.tmp-audit-store.cjs",
-    "test:monitor": "esbuild scripts/test-monitor-parse.mts --bundle --platform=node --format=cjs --outfile=scripts/.tmp-monitor-parse.cjs && node scripts/.tmp-monitor-parse.cjs"
+    "test:monitor": "esbuild scripts/test-monitor-parse.mts --bundle --platform=node --format=cjs --outfile=scripts/.tmp-monitor-parse.cjs && node scripts/.tmp-monitor-parse.cjs",
+    "test:monitor-compute": "esbuild scripts/test-monitor-compute.mts --bundle --platform=node --format=cjs --outfile=scripts/.tmp-monitor-compute.cjs && node scripts/.tmp-monitor-compute.cjs",
+    "test:agent-shell": "esbuild scripts/test-agent-shell.mts --bundle --platform=node --format=esm --external:ssh2 --outfile=scripts/.tmp-agent-shell.mjs && node scripts/.tmp-agent-shell.mjs",
+    "test:agent-shell-bash": "esbuild scripts/test-agent-shell-bash.mts --bundle --platform=node --format=esm --external:ssh2 --outfile=scripts/.tmp-agent-shell-bash.mjs && node scripts/.tmp-agent-shell-bash.mjs"
   },
   "dependencies": {
     "@codemirror/lang-css": "^6.3.1",

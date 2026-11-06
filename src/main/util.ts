@@ -1,5 +1,5 @@
 import { promises as fs } from 'node:fs'
-import { dirname } from 'node:path'
+import { dirname, join } from 'node:path'
 
 export async function ensureDir(dir: string): Promise<void> {
   await fs.mkdir(dir, { recursive: true })
@@ -10,6 +10,25 @@ export async function writeFileAtomic(file: string, data: string): Promise<void>
   const tmp = `${file}.${process.pid}.tmp`
   await fs.writeFile(tmp, data, 'utf8')
   await fs.rename(tmp, file)
+}
+
+/**
+ * Local workspace shared by every agent window of one server. Claude Code keys
+ * its project (and conversation history) by the working directory, so sharing
+ * this path is what puts the windows of a server in one project.
+ */
+export function sessionWorkspacePath(userData: string, sessionId: string): string {
+  return join(userData, 'workspaces', sessionId)
+}
+
+/**
+ * Per-window files inside a shared workspace: MCP config, launcher, session
+ * metadata and the isolated Codex home. Kept separate so parallel windows never
+ * overwrite each other's MCP URL or token.
+ */
+export function agentFilesPath(workspace: string, agentSessionId: string): string {
+  const safeAgentId = agentSessionId.replace(/[^a-zA-Z0-9_-]/g, '')
+  return join(workspace, '.aishell', 'agents', safeAgentId || 'agent')
 }
 
 export function truncateText(text: string, limit: number): { text: string; truncated: boolean } {

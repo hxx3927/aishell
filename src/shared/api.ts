@@ -1,6 +1,6 @@
 import type {
   ActivityEvent,
-  AgentRuntime,
+  AgentSession,
   AppState,
   ConnectionStatus,
   FileContent,
@@ -17,6 +17,7 @@ import type {
   AgentExitEvent,
   AgentStateEvent,
   AgentShellStateEvent,
+  AgentWindowEntry,
   AuditInfo,
   AuditQuery,
   AuditQueryResult,
@@ -106,11 +107,40 @@ export interface AishellApi {
   }
 
   agent: {
-    launch(sessionId: string, profileId: string): Promise<AgentRuntime>
+    /**
+     * Creates an agent window with its own SSH connection and MCP scope. All
+     * windows of a server share the local workspace (and Claude Code project).
+     * `cols`/`rows` are the renderer's terminal size so the CLI starts with the
+     * right geometry instead of a 120x32 default.
+     */
+    launch(
+      sessionId: string,
+      profileId: string,
+      name?: string,
+      cols?: number,
+      rows?: number
+    ): Promise<AgentSession>
+    /** Reopens an ended window in its workspace, continuing its own CLI chat. */
+    resume(agentSessionId: string, cols?: number, rows?: number): Promise<AgentSession>
+    /** Ended windows of a server, newest first. */
+    history(sessionId: string): Promise<AgentWindowEntry[]>
+    /**
+     * Conversation titles of the session's windows, keyed by agentSessionId.
+     * Claude Code titles a conversation with its first prompt; windows that
+     * never talked have no entry.
+     */
+    titles(sessionId: string): Promise<Record<string, string>>
+    /**
+     * Deletes a history entry, its per-window files and its own CLI transcript.
+     * A shared workspace and the other windows of the server are left alone.
+     */
+    forget(agentSessionId: string): Promise<boolean>
+    list(sessionId: string): Promise<AgentSession[]>
     stop(agentSessionId: string): Promise<boolean>
+    /** Re-establishes the agent's SSH connection after a drop. */
+    reconnect(agentSessionId: string): Promise<AgentSession>
     input(agentSessionId: string, data: string): Promise<boolean>
     resize(agentSessionId: string, cols: number, rows: number): Promise<boolean>
-    get(sessionId: string): Promise<AgentRuntime | undefined>
   }
 
   activity: {
@@ -118,7 +148,7 @@ export interface AishellApi {
   }
 
   agentShell: {
-    close(sessionId: string): Promise<boolean>
+    close(connId: string): Promise<boolean>
   }
 
   audit: {

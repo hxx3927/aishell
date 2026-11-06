@@ -14,6 +14,8 @@ import { formatClock } from '../lib/format'
 
 interface ActivityFeedProps {
   sessionId?: string
+  /** Narrows the feed to one agent instance (several may share a server). */
+  agentSessionId?: string
   compact?: boolean
 }
 
@@ -40,17 +42,19 @@ function argsPreview(event: ActivityEvent): string {
   return typeof first === 'string' ? first : ''
 }
 
-export function ActivityFeed({ sessionId, compact }: ActivityFeedProps) {
+export function ActivityFeed({ sessionId, agentSessionId, compact }: ActivityFeedProps) {
   const activities = useAppStore((s) => s.activities)
   const sessions = useAppStore((s) => s.sessions)
   const [expanded, setExpanded] = useState<string | null>(null)
 
   const filtered = useMemo(() => {
-    const list = sessionId
-      ? activities.filter((event) => event.sessionId === sessionId)
-      : activities
+    const list = activities.filter((event) => {
+      if (sessionId && event.sessionId !== sessionId) return false
+      if (agentSessionId && event.agentSessionId !== agentSessionId) return false
+      return true
+    })
     return list.slice(0, compact ? 80 : 300)
-  }, [activities, sessionId, compact])
+  }, [activities, sessionId, agentSessionId, compact])
 
   if (filtered.length === 0) {
     return (

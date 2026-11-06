@@ -17,6 +17,7 @@ interface JsonRpcRequest {
 export interface BashHookEvent {
   sessionId: string
   agentSessionId?: string
+  connId?: string
   command: string
   cwd?: string
   transport?: string
@@ -59,11 +60,17 @@ export class McpServer {
     return this.port
   }
 
-  /** Scoped endpoint for a session; `agentSessionId` tags calls with the agent that made them. */
-  getUrl(sessionId: string, agentSessionId?: string): string {
+  /**
+   * Scoped endpoint for a session. `agentSessionId` tags calls with the agent
+   * that made them; `connId` binds them to one connection instance.
+   */
+  getUrl(sessionId: string, agentSessionId?: string, connId?: string): string {
     const scope = encodeURIComponent(sessionId)
-    const agent = agentSessionId ? `?agent=${encodeURIComponent(agentSessionId)}` : ''
-    return `http://127.0.0.1:${this.port}/mcp/${scope}${agent}`
+    const params = new URLSearchParams()
+    if (agentSessionId) params.set('agent', agentSessionId)
+    if (connId) params.set('conn', connId)
+    const query = params.size ? `?${params.toString()}` : ''
+    return `http://127.0.0.1:${this.port}/mcp/${scope}${query}`
   }
 
   /**
@@ -145,7 +152,8 @@ export class McpServer {
 
     const scope: McpScope = {
       sessionId: decodeURIComponent(url.pathname.slice('/mcp'.length).replace(/^\//, '')),
-      agentSessionId: url.searchParams.get('agent') || undefined
+      agentSessionId: url.searchParams.get('agent') || undefined,
+      connId: url.searchParams.get('conn') || undefined
     }
     const body = await readBody(req).catch((err: Error) => {
       res.writeHead(413, { 'content-type': 'application/json' })

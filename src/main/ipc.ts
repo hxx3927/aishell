@@ -37,7 +37,8 @@ export function registerIpc(deps: Deps): void {
     },
     userDataPath: app.getPath('userData'),
     encryptionAvailable: store.isEncryptionAvailable(),
-    agentShells: ssh.listAgentShells()
+    agentShells: ssh.listAgentShells(),
+    agents: agents.listAll()
   }))
 
   ipcMain.handle('session:save', (_e, input: SessionInput) => store.saveSession(input))
@@ -61,6 +62,8 @@ export function registerIpc(deps: Deps): void {
     ssh.disconnectSession(sessionId)
     return true
   })
+  // One terminal tab: agents have their own connections, so this only closes
+  // the terminal's transport.
   ipcMain.handle('ssh:disconnectConn', (_e, connId: string) => {
     ssh.disconnect(connId)
     return true
@@ -152,13 +155,27 @@ export function registerIpc(deps: Deps): void {
     }
   })
 
-  ipcMain.handle('agent:launch', (_e, sessionId: string, profileId: string) =>
-    agents.launch(sessionId, profileId)
+  ipcMain.handle(
+    'agent:launch',
+    (_e, sessionId: string, profileId: string, name?: string, cols?: number, rows?: number) =>
+      agents.launch(sessionId, profileId, name, cols, rows)
   )
+  ipcMain.handle('agent:list', (_e, sessionId: string) => agents.list(sessionId))
+  ipcMain.handle(
+    'agent:resume',
+    (_e, agentSessionId: string, cols?: number, rows?: number) =>
+      agents.resume(agentSessionId, cols, rows)
+  )
+  ipcMain.handle('agent:history', (_e, sessionId: string) => agents.history(sessionId))
+  ipcMain.handle('agent:titles', (_e, sessionId: string) => agents.titles(sessionId))
+  ipcMain.handle('agent:forget', (_e, agentSessionId: string) => agents.forget(agentSessionId))
   ipcMain.handle('agent:stop', (_e, agentSessionId: string) => {
     agents.stop(agentSessionId)
     return true
   })
+  ipcMain.handle('agent:reconnect', (_e, agentSessionId: string) =>
+    agents.reconnect(agentSessionId)
+  )
   ipcMain.handle('agent:input', (_e, agentSessionId: string, data: string) => {
     agents.write(agentSessionId, data)
     return true
@@ -167,12 +184,11 @@ export function registerIpc(deps: Deps): void {
     agents.resize(agentSessionId, cols, rows)
     return true
   })
-  ipcMain.handle('agent:get', (_e, sessionId: string) => agents.getRuntime(sessionId))
 
   ipcMain.handle('activity:list', (_e, sessionId?: string) => activity.list(sessionId))
 
-  ipcMain.handle('agentShell:close', (_e, sessionId: string) =>
-    ssh.closeAgentShell(sessionId, 'user')
+  ipcMain.handle('agentShell:close', (_e, connId: string) =>
+    ssh.closeAgentShell(connId, 'user')
   )
 
   ipcMain.handle('audit:query', (_e, query: AuditQuery) => audit.query(query))

@@ -1,28 +1,60 @@
 import { app } from 'electron'
 import { spawnSync } from 'node:child_process'
-import { promises as fsp } from 'node:fs'
+import { promises as fsp, readFileSync } from 'node:fs'
 import { existsSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { dirname, isAbsolute, join } from 'node:path'
+import { dirname, isAbsolute, join, resolve, sep } from 'node:path'
 import { randomUUID } from 'node:crypto'
-import type { AgentProfile, AgentRuntime, Session } from '@shared/types'
+import type {
+  AgentExitReason,
+  AgentProfile,
+  AgentSession,
+  AgentWindowEntry,
+  AgentWindowRecord,
+  Session
+} from '@shared/types'
 import type { SessionStore } from '../store/SessionStore'
 import type { SshManager } from '../ssh/SshManager'
 import type { PtyManager } from '../pty/PtyManager'
 import type { McpServer } from '../mcp/server'
 import type { AuditStore } from '../audit/AuditStore'
 import { captureSnapshot } from '../audit/snapshot'
-import { ensureDir, quoteWinArg, shellQuote, writeFileAtomic } from '../util'
+import {
+  agentFilesPath,
+  ensureDir,
+  quoteWinArg,
+  sessionWorkspacePath,
+  shellQuote,
+  writeFileAtomic
+} from '../util'
 
-interface Runtime extends AgentRuntime {
+interface Runtime extends AgentSession {
   ptyId: string
+  finalized: boolean
 }
 
 type Send = (channel: string, payload: unknown) => void
 
 export class AgentManager {
+  /** Keyed by agent window id; a server may hold any number of them. */
   private runtimes = new Map<string, Runtime>()
-  private bySession = new Map<string, string>()
+  private bySession = new Map<string, Set<string>>()
+  /** Per-server, per-profile counters for default window names. */
+  private nameSeq = new Map<string, number>()
+  /** Every window ever launched, including ended ones, for resuming. */
+  private records = new Map<string, AgentWindowRecord>()
+  /**
+   * Last terminal size each window asked for. A resize can arrive before the
+   * PTY exists — the renderer mounts its terminal while the agent is still
+   * `starting` — so the spawn uses this instead of a fixed default.
+   */
+  private sizes = new Map<string, { cols: number; rows: number }>()
+  /**
+   * First prompt of each transcript, keyed by file and invalidated by size and
+   * mtime. Claude Code names a conversation after it first prompt; the panel
+   * shows that instead of the generic "Claude Code #n".
+   */
+  private titleCache = new Map<string, { key: string; title?: string }>()
 
   constructor(
     private readonly store: SessionStore,
@@ -31,76 +63,312 @@ export class AgentManager {
     private readonly mcp: McpServer,
     private readonly audit: AuditStore,
     private readonly send: Send
-  ) {}
-
-  getRuntime(sessionId: string): AgentRuntime | undefined {
-    const id = this.bySession.get(sessionId)
-    if (!id) return undefined
-    const rt = this.runtimes.get(id)
-    if (!rt) return undefined
-    const { ptyId: _ptyId, ...publicRuntime } = rt
-    return publicRuntime
+  ) {
+    this.loadRecords()
   }
 
-  getRuntimeById(agentSessionId: string): AgentRuntime | undefined {
+  private get recordsFile(): string {
+    return join(app.getPath('userData'), 'agent-windows.json')
+  }
+
+  getRuntimeById(agentSessionId: string): AgentSession | undefined {
     const rt = this.runtimes.get(agentSessionId)
-    if (!rt) return undefined
-    const { ptyId: _ptyId, ...publicRuntime } = rt
-    return publicRuntime
+    return rt ? this.toPublic(rt) : undefined
   }
 
-  async launch(sessionId: string, profileId: string): Promise<AgentRuntime> {
+  list(sessionId: string): AgentSession[] {
+    const ids = this.bySession.get(sessionId)
+    if (!ids) return []
+    return Array.from(ids)
+      .map((id) => this.runtimes.get(id))
+      .filter((rt): rt is Runtime => Boolean(rt))
+      .map((rt) => this.toPublic(rt))
+  }
+
+  listAll(): AgentSession[] {
+    return Array.from(this.runtimes.values()).map((rt) => this.toPublic(rt))
+  }
+
+  /**
+   * Creates an agent window. Each window owns its SSH connection, MCP scope and
+   * persistent shell so several can run in parallel on one host; the workspace
+   * (and therefore the Claude Code project) is shared by the server's windows.
+   */
+  async launch(
+    sessionId: string,
+    profileId: string,
+    name?: string,
+    cols?: number,
+    rows?: number
+  ): Promise<AgentSession> {
     const session = this.store.getSession(sessionId)
     if (!session) throw new Error('会话不存在')
-    if (!this.ssh.isConnected(sessionId)) throw new Error('请先连接 SSH 会话')
+    const profile = this.findProfile(profileId, true)
+    return this.launchWindow(session, profile, name, undefined, sanitizeSize(cols, rows))
+  }
 
-    const settings = this.store.getSettings()
-    const profile = settings.agentProfiles.find((p) => p.id === profileId && p.enabled)
-    if (!profile) throw new Error('Agent 不存在或未启用')
-    if (!profile.command.trim()) throw new Error('Agent 命令为空，请先在设置中配置')
+  /**
+   * Reopens an ended window in its original workspace. When the CLI still has a
+   * conversation there it is told to continue it.
+   */
+  async resume(
+    agentSessionId: string,
+    cols?: number,
+    rows?: number
+  ): Promise<AgentSession> {
+    const record = this.records.get(agentSessionId)
+    if (!record) throw new Error('会话记录不存在')
+    if (this.runtimes.has(agentSessionId)) throw new Error('该窗口仍在运行')
+    const session = this.store.getSession(record.sessionId)
+    if (!session) throw new Error('会话不存在')
+    const profile = this.findProfile(record.profileId, true)
+    return this.launchWindow(
+      session,
+      profile,
+      record.name,
+      record,
+      sanitizeSize(cols, rows)
+    )
+  }
 
-    this.stopForSession(sessionId)
+  /** Ended windows of one server, newest first. */
+  async history(sessionId: string): Promise<AgentWindowEntry[]> {
+    const ended = Array.from(this.records.values())
+      .filter((record) => record.sessionId === sessionId && !this.runtimes.has(record.agentSessionId))
+      .sort((a, b) => b.lastActiveAt - a.lastActiveAt)
+    return Promise.all(
+      ended.map(async (record) => ({
+        ...record,
+        resumable: await this.hasHistory(
+          record.kind,
+          record.workspace,
+          record.agentSessionId,
+          record.cliSessionId
+        )
+      }))
+    )
+  }
 
-    const agentSessionId = randomUUID()
-    const workspace = join(app.getPath('userData'), 'workspaces', sessionId)
-    await ensureDir(join(workspace, '.aishell'))
-
-    const hostInfo = this.ssh.getHostInfo(sessionId)
-    const mcpUrl = this.mcp.getUrl(sessionId, agentSessionId)
-    const env: Record<string, string> = {
-      ...process.env as Record<string, string>,
-      AISHELL_MCP_URL: mcpUrl,
-      AISHELL_MCP_TOKEN: this.mcp.token,
-      AISHELL_SESSION_ID: sessionId,
-      AISHELL_SESSION_HOST: `${session.username}@${session.host}:${session.port}`,
-      AISHELL_WORKSPACE: workspace
+  /**
+   * Conversation titles of the session's windows, keyed by agentSessionId.
+   * Only windows that have already talked have one.
+   */
+  async titles(sessionId: string): Promise<Record<string, string>> {
+    const out: Record<string, string> = {}
+    for (const record of this.records.values()) {
+      if (record.sessionId !== sessionId) continue
+      if (record.kind !== 'claude' || !record.cliSessionId) continue
+      const title = await this.readTitle(record.workspace, record.cliSessionId)
+      if (title) out[record.agentSessionId] = title
     }
+    return out
+  }
+
+  /**
+   * Deletes a history entry. A window in the shared project only loses its own
+   * files and its own Claude transcript; the project directory, its files and
+   * the other windows' conversations stay.
+   */
+  async forget(agentSessionId: string): Promise<boolean> {
+    if (this.runtimes.has(agentSessionId)) throw new Error('窗口仍在运行，请先停止')
+    const record = this.records.get(agentSessionId)
+    if (!record) return false
+    this.records.delete(agentSessionId)
+    this.sizes.delete(agentSessionId)
+    this.saveRecords()
+
+    const userData = app.getPath('userData')
+    // Never delete outside the workspace root, even if the stored path is odd.
+    const root = resolve(userData, 'workspaces')
+    const target = resolve(record.workspace)
+    const shared = resolve(sessionWorkspacePath(userData, record.sessionId))
+    if (target === shared) {
+      await fsp
+        .rm(agentFilesPath(target, record.agentSessionId), { recursive: true, force: true })
+        .catch(() => undefined)
+    } else if (target.startsWith(`${root}${sep}`)) {
+      // A window from before the shared project owned its whole directory.
+      await fsp.rm(target, { recursive: true, force: true }).catch(() => undefined)
+    }
+
+    if (record.kind === 'claude' && record.cliSessionId) {
+      await this.forgetTranscript(record.workspace, record.cliSessionId)
+    }
+    return true
+  }
+
+  /** Removes only the transcript this window owns, never a sibling's. */
+  private async forgetTranscript(workspace: string, cliSessionId: string): Promise<void> {
+    // Guard against a malformed record turning into path traversal.
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(cliSessionId)) {
+      return
+    }
+    const configDir = process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude')
+    const project = workspace.replace(/[^a-zA-Z0-9]/g, '-')
+    await fsp
+      .rm(join(configDir, 'projects', project, `${cliSessionId}.jsonl`), { force: true })
+      .catch(() => undefined)
+  }
+
+  private findProfile(profileId: string, requireEnabled: boolean): AgentProfile {
+    const profile = this.store.getSettings().agentProfiles.find((p) => p.id === profileId)
+    if (!profile) throw new Error('Agent 配置不存在，请到设置中检查')
+    if (requireEnabled && !profile.enabled) throw new Error('Agent 配置已停用，请到设置中启用')
+    if (!profile.command.trim()) throw new Error('Agent 命令为空，请先在设置中配置')
+    return profile
+  }
+
+  private async launchWindow(
+    session: Session,
+    profile: AgentProfile,
+    name?: string,
+    previous?: AgentWindowRecord,
+    size?: { cols: number; rows: number }
+  ): Promise<AgentSession> {
+    const sessionId = session.id
+    const agentSessionId = previous?.agentSessionId ?? randomUUID()
+    const connId = `agent:${agentSessionId}`
+    // New windows join the server's shared project directory; records created
+    // before that change keep their own workspace, so «继续» still works.
+    const workspace =
+      previous?.workspace ?? sessionWorkspacePath(app.getPath('userData'), sessionId)
+    await ensureDir(join(workspace, '.aishell'))
+    if (size) this.sizes.set(agentSessionId, size)
+
+    // Every window keeps its own Claude session id. The project directory is
+    // shared, so `--continue` would resume whichever window talked last;
+    // `--resume <id>` pins the conversation to this window. Records without an
+    // id predate the shared workspace and stay on `--continue` (theirs is
+    // isolated, so it is unambiguous there).
+    const cliSessionId =
+      profile.kind === 'claude' ? (previous ? previous.cliSessionId : randomUUID()) : undefined
+
+    // Only continue when the CLI's own history for this window still exists;
+    // resuming fails when there is nothing to resume.
+    const resumeHistory = previous
+      ? await this.hasHistory(previous.kind, workspace, agentSessionId, previous.cliSessionId)
+      : false
 
     const runtime: Runtime = {
       agentSessionId,
       sessionId,
+      connId,
+      name: name?.trim() || previous?.name || this.nextName(sessionId, profile),
       profileId: profile.id,
       profileLabel: profile.label,
       status: 'starting',
       workspace,
-      ptyId: agentSessionId
+      createdAt: Date.now(),
+      ptyId: agentSessionId,
+      finalized: false
     }
+
+    const now = Date.now()
+    const record: AgentWindowRecord = previous
+      ? {
+          ...previous,
+          profileId: profile.id,
+          profileLabel: profile.label,
+          kind: profile.kind,
+          name: runtime.name,
+          workspace,
+          lastActiveAt: now
+        }
+      : {
+          agentSessionId,
+          sessionId,
+          profileId: profile.id,
+          profileLabel: profile.label,
+          kind: profile.kind,
+          name: runtime.name,
+          workspace,
+          createdAt: now,
+          lastActiveAt: now
+        }
+    delete record.endedAt
+    delete record.endReason
+    if (cliSessionId) record.cliSessionId = cliSessionId
+    else delete record.cliSessionId
+    this.records.set(agentSessionId, record)
+    this.saveRecords()
+
     this.runtimes.set(agentSessionId, runtime)
-    this.bySession.set(sessionId, agentSessionId)
+    const siblings = this.bySession.get(sessionId) ?? new Set<string>()
+    siblings.add(agentSessionId)
+    this.bySession.set(sessionId, siblings)
     this.emitState(runtime)
 
     try {
-      await this.writeContext(session, profile, workspace, mcpUrl, hostInfo)
+      // The window's own transport. A dropped agent connection never takes a
+      // terminal or another agent with it.
+      await this.ssh.connect(connId, sessionId)
+      if (runtime.finalized) throw new Error('启动已取消')
+
+      const hostInfo = await this.ssh
+        .gatherHostInfo(connId)
+        .catch(() => this.ssh.getHostInfo(connId))
+      const mcpUrl = this.mcp.getUrl(sessionId, agentSessionId, connId)
+      const env: Record<string, string> = {
+        ...baseAgentEnv(),
+        AISHELL_MCP_URL: mcpUrl,
+        AISHELL_MCP_TOKEN: this.mcp.token,
+        AISHELL_SESSION_ID: sessionId,
+        AISHELL_CONN_ID: connId,
+        AISHELL_AGENT_SESSION_ID: agentSessionId,
+        AISHELL_SESSION_HOST: `${session.username}@${session.host}:${session.port}`,
+        AISHELL_WORKSPACE: workspace
+      }
+
+      await this.writeContext(
+        session,
+        profile,
+        workspace,
+        agentSessionId,
+        mcpUrl,
+        hostInfo,
+        connId,
+        runtime.name
+      )
+      if (runtime.finalized) throw new Error('启动已取消')
 
       let command: { file: string; args: string[] }
       if (profile.kind === 'claude') {
-        command = await this.prepareClaude(agentSessionId, session, profile, workspace, mcpUrl, env)
+        command = await this.prepareClaude(
+          agentSessionId,
+          session,
+          profile,
+          workspace,
+          mcpUrl,
+          env,
+          resumeHistory,
+          cliSessionId
+        )
       } else if (profile.kind === 'codex') {
-        command = await this.prepareCodex(agentSessionId, session, profile, workspace, mcpUrl, env)
+        command = await this.prepareCodex(
+          agentSessionId,
+          session,
+          profile,
+          workspace,
+          mcpUrl,
+          env,
+          resumeHistory
+        )
       } else {
-        command = await this.prepareCustom(agentSessionId, session, profile, workspace, env)
+        command = await this.prepareCustom(
+          agentSessionId,
+          session,
+          profile,
+          workspace,
+          env,
+          Boolean(previous)
+        )
       }
+      if (runtime.finalized) throw new Error('启动已取消')
 
+      // Spawn at the size the renderer already measured. A CLI that starts at
+      // 120x32 inside a narrow panel draws a wide TUI and repaints it badly
+      // when it is resized afterwards.
+      const initialSize = this.sizes.get(agentSessionId) ?? { cols: 120, rows: 32 }
       this.pty.create(
         agentSessionId,
         {
@@ -108,39 +376,39 @@ export class AgentManager {
           args: command.args,
           cwd: workspace,
           env,
-          cols: 120,
-          rows: 32
+          cols: initialSize.cols,
+          rows: initialSize.rows
         },
         {
           onData: (data) => this.send('agent:data', { agentSessionId, data }),
-          onExit: (code) => {
-            const rt = this.runtimes.get(agentSessionId)
-            if (!rt) return
-            if (rt.status !== 'stopped') {
-              this.recordAgent(rt, 'exit', { exitCode: code })
-            }
-            rt.status = 'stopped'
-            this.emitState(rt)
-            this.send('agent:exit', { agentSessionId, code })
-          }
+          onExit: (code) => this.finalize(agentSessionId, code, 'exit')
         }
       )
+
+      if (runtime.finalized) {
+        this.pty.kill(agentSessionId)
+        throw new Error('启动已取消')
+      }
 
       runtime.status = 'running'
       this.emitState(runtime)
       this.recordAgent(runtime, 'launch', { command: profile.command, args: profile.args ?? [] })
       void captureSnapshot(this.ssh, this.store, this.audit, {
         sessionId,
+        connId,
         trigger: 'agent_launch',
         agentSessionId,
         profileId: profile.id
       })
       return this.toPublic(runtime)
     } catch (err) {
+      if (runtime.finalized) throw new Error('启动已取消')
       runtime.status = 'error'
       runtime.error = (err as Error).message
       this.emitState(runtime)
-      throw err
+      this.recordAgent(runtime, 'error', { error: runtime.error })
+      this.ssh.disconnect(connId)
+      return this.toPublic(runtime)
     }
   }
 
@@ -149,38 +417,180 @@ export class AgentManager {
   }
 
   resize(agentSessionId: string, cols: number, rows: number): void {
+    const size = sanitizeSize(cols, rows)
+    if (size) this.sizes.set(agentSessionId, size)
     this.pty.resize(agentSessionId, cols, rows)
   }
 
+  /**
+   * Stops a window and removes it from state. The workspace stays on disk; the
+   * renderer falls back to the agent picker when no window is left.
+   */
   stop(agentSessionId: string): void {
-    const rt = this.runtimes.get(agentSessionId)
-    if (!rt) return
-    if (rt.status === 'running' || rt.status === 'starting') this.recordAgent(rt, 'stop')
-    this.pty.kill(agentSessionId)
-    rt.status = 'stopped'
-    this.emitState(rt)
-    if (this.bySession.get(rt.sessionId) === agentSessionId) {
-      this.bySession.delete(rt.sessionId)
-    }
+    this.finalize(agentSessionId, 0, 'stopped')
   }
 
+  /** Re-establishes the SSH connection after a network drop. */
+  async reconnect(agentSessionId: string): Promise<AgentSession> {
+    const rt = this.runtimes.get(agentSessionId)
+    if (!rt) throw new Error('Agent 不存在或已停止')
+    await this.ssh.connect(rt.connId, rt.sessionId)
+    return this.toPublic(rt)
+  }
+
+  /** Stops every agent of a session. */
   stopForSession(sessionId: string): void {
-    const id = this.bySession.get(sessionId)
-    if (id) this.stop(id)
+    const ids = this.bySession.get(sessionId)
+    if (!ids) return
+    for (const id of Array.from(ids)) this.stop(id)
   }
 
   disposeAll(): void {
+    const endedAt = Date.now()
     for (const rt of this.runtimes.values()) {
-      if (rt.status === 'running' || rt.status === 'starting') this.recordAgent(rt, 'app_quit')
-      rt.status = 'stopped'
+      if (!rt.finalized && (rt.status === 'running' || rt.status === 'starting')) {
+        this.recordAgent(rt, 'app_quit')
+      }
+      rt.finalized = true
+      const record = this.records.get(rt.agentSessionId)
+      if (record) {
+        record.endedAt = endedAt
+        record.endReason = 'app_quit'
+        record.lastActiveAt = endedAt
+      }
+      this.ssh.disconnect(rt.connId)
     }
+    this.saveRecords()
     this.pty.disposeAll()
     this.runtimes.clear()
     this.bySession.clear()
   }
 
-  private toPublic(runtime: Runtime): AgentRuntime {
-    const { ptyId: _ptyId, ...publicRuntime } = runtime
+  private finalize(agentSessionId: string, code: number, reason: AgentExitReason): void {
+    const rt = this.runtimes.get(agentSessionId)
+    if (!rt || rt.finalized) return
+    rt.finalized = true
+    if (rt.status === 'running' || rt.status === 'starting') {
+      this.recordAgent(
+        rt,
+        reason === 'stopped' ? 'stop' : reason === 'app_quit' ? 'app_quit' : 'exit',
+        { exitCode: code }
+      )
+    }
+    const record = this.records.get(agentSessionId)
+    if (record) {
+      record.endedAt = Date.now()
+      record.endReason = reason
+      record.lastActiveAt = record.endedAt
+      this.saveRecords()
+    }
+    this.pty.kill(agentSessionId)
+    this.ssh.disconnect(rt.connId)
+    this.runtimes.delete(agentSessionId)
+    // The size outlives a stop so «继续» reopens at the same geometry; it is
+    // dropped in forget(), together with the window record.
+    const siblings = this.bySession.get(rt.sessionId)
+    siblings?.delete(agentSessionId)
+    if (siblings && siblings.size === 0) this.bySession.delete(rt.sessionId)
+    this.send('agent:exit', { agentSessionId, code, reason })
+  }
+
+  /** First prompt of a window's transcript, cached until the file changes. */
+  private async readTitle(workspace: string, cliSessionId: string): Promise<string | undefined> {
+    const configDir = process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude')
+    const project = workspace.replace(/[^a-zA-Z0-9]/g, '-')
+    const file = join(configDir, 'projects', project, `${cliSessionId}.jsonl`)
+    try {
+      const stat = await fsp.stat(file)
+      const key = `${stat.size}:${stat.mtimeMs}`
+      const cached = this.titleCache.get(file)
+      if (cached && cached.key === key) return cached.title
+      const title = await firstPrompt(file)
+      this.titleCache.set(file, { key, title })
+      return title
+    } catch {
+      return undefined
+    }
+  }
+
+  /** Whether the CLI has a conversation recorded for this window. */
+  private async hasHistory(
+    kind: AgentWindowRecord['kind'],
+    workspace: string,
+    agentSessionId: string,
+    cliSessionId?: string
+  ): Promise<boolean> {
+    if (kind === 'claude') {
+      const configDir = process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude')
+      // Claude Code names its project directory after the cwd, replacing every
+      // non-alphanumeric character with a dash.
+      const project = workspace.replace(/[^a-zA-Z0-9]/g, '-')
+      const dir = join(configDir, 'projects', project)
+      // With the project shared, a recorded id is the only way to tell whether
+      // *this* window has a conversation; without one, any transcript will do.
+      if (cliSessionId) return existsSync(join(dir, `${cliSessionId}.jsonl`))
+      return hasJsonl(dir)
+    }
+    if (kind === 'codex') {
+      if (await hasJsonl(join(agentFilesPath(workspace, agentSessionId), 'codex', 'sessions'))) {
+        return true
+      }
+      // Windows created before the shared workspace kept Codex's home at the root.
+      return hasJsonl(join(workspace, '.codex', 'sessions'))
+    }
+    // Custom agents keep their own history; the workspace is all we can reuse.
+    return false
+  }
+
+  private loadRecords(): void {
+    try {
+      const raw = JSON.parse(readFileSync(this.recordsFile, 'utf8')) as {
+        items?: AgentWindowRecord[]
+      }
+      for (const item of raw.items ?? []) {
+        if (item?.agentSessionId && item?.sessionId) {
+          this.records.set(item.agentSessionId, item)
+        }
+      }
+    } catch {
+      /* first run, or an unreadable history file */
+    }
+  }
+
+  private saveRecords(): void {
+    const items = Array.from(this.records.values()).sort(
+      (a, b) => b.lastActiveAt - a.lastActiveAt
+    )
+    // Bound the file; old workspaces stay on disk until deleted from the UI.
+    while (items.length > MAX_WINDOW_RECORDS) {
+      const dropped = items.pop()
+      if (dropped) this.records.delete(dropped.agentSessionId)
+    }
+    void writeFileAtomic(
+      this.recordsFile,
+      `${JSON.stringify({ version: 1, items }, null, 2)}\n`
+    ).catch((err) => {
+      console.warn('[agent] failed to save window records', err)
+    })
+  }
+
+  private nextName(sessionId: string, profile: AgentProfile): string {
+    const key = `${sessionId}:${profile.id}`
+    // Records survive restarts, so start above the highest suffix they already
+    // use; otherwise every restart names the next window #1 again.
+    let previous = 0
+    for (const record of this.records.values()) {
+      if (record.sessionId !== sessionId || record.profileId !== profile.id) continue
+      const suffix = /#(\d+)\s*$/.exec(record.name)
+      if (suffix) previous = Math.max(previous, Number(suffix[1]))
+    }
+    const ordinal = Math.max(this.nameSeq.get(key) ?? 0, previous) + 1
+    this.nameSeq.set(key, ordinal)
+    return `${profile.label} #${ordinal}`
+  }
+
+  private toPublic(runtime: Runtime): AgentSession {
+    const { ptyId: _ptyId, finalized: _finalized, ...publicRuntime } = runtime
     return publicRuntime
   }
 
@@ -198,7 +608,7 @@ export class AgentManager {
       agentSessionId: runtime.agentSessionId,
       profileId: runtime.profileId,
       action,
-      payload
+      payload: { ...payload, connId: runtime.connId }
     })
   }
 
@@ -206,8 +616,11 @@ export class AgentManager {
     session: Session,
     profile: AgentProfile,
     workspace: string,
+    agentSessionId: string,
     mcpUrl: string,
-    hostInfo: { os?: string; kernel?: string; home?: string; cwd?: string }
+    hostInfo: { os?: string; kernel?: string; home?: string; cwd?: string },
+    connId: string,
+    agentName: string
   ): Promise<void> {
     const host = `${session.username}@${session.host}:${session.port}`
     const content = `# AIShell 远程会话上下文
@@ -222,7 +635,6 @@ export class AgentManager {
 - 内核：${hostInfo.kernel ?? '未知'}
 - 远程家目录：${hostInfo.home ?? '未知'}
 - 远程当前目录：${hostInfo.cwd ?? '未知'}
-- MCP 服务：${mcpUrl}
 
 ## 可用 MCP 工具
 Claude Code 中工具名为 \`mcp__aishell__<tool>\`，其他客户端可能显示为 \`aishell.<tool>\`。
@@ -247,16 +659,25 @@ Claude Code 中工具名为 \`mcp__aishell__<tool>\`，其他客户端可能显�
 ## 审计
 你通过 AIShell 执行的每一次工具调用（含参数、退出码和输出摘要）都会在执行前写入本机审计日志，供事后复查。只有走 MCP 的操作才会被完整记录。
 
+## 并发
+这台服务器上可能同时运行多个 AIShell Agent 窗口。不要假设你对服务器有独占控制权；修改共享配置、重启服务或删除文件前先确认现状，避免和别的窗口互相覆盖。
+
 ## 工作区
 本机当前目录（${workspace}）只是 Agent 的临时工作区，不代表远程服务器。
+这台服务器的所有 Agent 窗口共用这个目录，也共用同一份 Claude Code 对话记录；不要把其他窗口正在使用的文件当作临时文件覆盖。
 如果需要把本机文件送到远程，使用 upload；需要取回远程文件，使用 download。
 `
 
+    // CLAUDE.md / AGENTS.md describe the server and are shared; everything that
+    // carries a per-window token, URL or name lives under the window's own dir.
+    const filesDir = agentFilesPath(workspace, agentSessionId)
     await Promise.all([
       writeFileAtomic(join(workspace, 'CLAUDE.md'), content),
       writeFileAtomic(join(workspace, 'AGENTS.md'), content),
-      writeFileAtomic(join(workspace, '.aishell', 'session.json'), JSON.stringify({
+      writeFileAtomic(join(filesDir, 'session.json'), JSON.stringify({
         sessionId: session.id,
+        connId,
+        agentName,
         name: session.name,
         host: session.host,
         port: session.port,
@@ -265,7 +686,7 @@ Claude Code 中工具名为 \`mcp__aishell__<tool>\`，其他客户端可能显�
         mcpUrl
       }, null, 2)),
       writeFileAtomic(
-        join(workspace, '.aishell', 'claude-mcp.json'),
+        join(filesDir, 'claude-mcp.json'),
         JSON.stringify(
           {
             mcpServers: {
@@ -280,7 +701,7 @@ Claude Code 中工具名为 \`mcp__aishell__<tool>\`，其他客户端可能显�
           2
         )
       ),
-      writeFileAtomic(join(workspace, '.aishell', 'README.md'), this.customReadme(session, mcpUrl))
+      writeFileAtomic(join(filesDir, 'README.md'), this.customReadme(session, mcpUrl))
     ])
   }
 
@@ -321,11 +742,34 @@ Claude Code 中工具名为 \`mcp__aishell__<tool>\`，其他客户端可能显�
     profile: AgentProfile,
     workspace: string,
     _mcpUrl: string,
-    _env: Record<string, string>
+    _env: Record<string, string>,
+    resume: boolean,
+    cliSessionId?: string
   ): Promise<{ file: string; args: string[] }> {
-    const configPath = join(workspace, '.aishell', 'claude-mcp.json')
+    // Per-window config: the token and URL are scoped to this window, and
+    // sibling windows share the directory.
+    const configPath = join(agentFilesPath(workspace, agentSessionId), 'claude-mcp.json')
     const args = [...(profile.args ?? []), '--mcp-config', configPath]
     if (this.store.getSettings().claudeStrictMcp) args.push('--strict-mcp-config')
+    // The user may have put their own resume/session flags in the profile args.
+    const userArgs = profile.args ?? []
+    const hasResumeFlag = userArgs.some(
+      (arg) => ['--continue', '--resume', '-c', '-r'].includes(arg) || arg.startsWith('--resume=')
+    )
+    const hasSessionFlag = userArgs.some(
+      (arg) => arg === '--session-id' || arg.startsWith('--session-id=')
+    )
+    if (!hasResumeFlag && !hasSessionFlag) {
+      if (resume) {
+        // Resume this window's own conversation rather than whatever the
+        // shared project saw most recently.
+        if (cliSessionId) args.push('--resume', cliSessionId)
+        else args.push('--continue')
+      } else if (cliSessionId) {
+        // Assign the id up front so a later «继续» can address it exactly.
+        args.push('--session-id', cliSessionId)
+      }
+    }
     await this.installBashAuditHook(workspace)
     return this.makeLauncher(agentSessionId, workspace, profile.command, args)
   }
@@ -408,9 +852,12 @@ Claude Code 中工具名为 \`mcp__aishell__<tool>\`，其他客户端可能显�
     profile: AgentProfile,
     workspace: string,
     mcpUrl: string,
-    env: Record<string, string>
+    env: Record<string, string>,
+    resume: boolean
   ): Promise<{ file: string; args: string[] }> {
-    const codexHome = join(workspace, '.codex')
+    // Codex history is keyed by CODEX_HOME, not by cwd, so each window keeps its
+    // own home even though they all share the project directory.
+    const codexHome = join(agentFilesPath(workspace, agentSessionId), 'codex')
     await ensureDir(codexHome)
 
     const realHome = process.env.CODEX_HOME || join(homedir(), '.codex')
@@ -458,7 +905,12 @@ bearer_token_env_var = "AISHELL_MCP_TOKEN"
     }
 
     env.CODEX_HOME = codexHome
-    return this.makeLauncher(agentSessionId, workspace, profile.command, profile.args ?? [])
+    const baseArgs = profile.args ?? []
+    // `codex resume --last` reads the same CODEX_HOME, so history is local to
+    // this window's workspace. User args (model, sandbox) still apply.
+    const args =
+      resume && !baseArgs.includes('resume') ? ['resume', '--last', ...baseArgs] : baseArgs
+    return this.makeLauncher(agentSessionId, workspace, profile.command, args)
   }
 
   private async prepareCustom(
@@ -466,8 +918,12 @@ bearer_token_env_var = "AISHELL_MCP_TOKEN"
     _session: Session,
     profile: AgentProfile,
     workspace: string,
-    _env: Record<string, string>
+    env: Record<string, string>,
+    reopened: boolean
   ): Promise<{ file: string; args: string[] }> {
+    // AIShell cannot know how a custom CLI resumes, so it only signals that the
+    // window is being reopened in the same workspace.
+    if (reopened) env.AISHELL_RESUME = '1'
     return this.makeLauncher(agentSessionId, workspace, profile.command, profile.args ?? [])
   }
 
@@ -477,7 +933,7 @@ bearer_token_env_var = "AISHELL_MCP_TOKEN"
     command: string,
     args: string[]
   ): Promise<{ file: string; args: string[] }> {
-    const scriptDir = join(workspace, '.aishell')
+    const scriptDir = agentFilesPath(workspace, agentSessionId)
     await ensureDir(scriptDir)
 
     if (process.platform === 'win32') {
@@ -573,6 +1029,7 @@ async function main() {
       },
       body: JSON.stringify({
         sessionId: sessionId,
+        connId: base.searchParams.get('conn') || undefined,
         agentSessionId: base.searchParams.get('agent') || undefined,
         command: command,
         cwd: typeof payload.cwd === 'string' ? payload.cwd : undefined,
@@ -590,6 +1047,117 @@ async function main() {
 
 main().catch(() => undefined).finally(() => process.exit(0))
 `
+
+/** Keeps the history file bounded; removing a record is what frees a workspace. */
+const MAX_WINDOW_RECORDS = 100
+
+/**
+ * Marker variables Claude Code sets when it starts another CLI. If AIShell was
+ * itself launched from a Claude Code shell, these leak into the agent process,
+ * which then treats itself as a nested session and stops saving transcripts --
+ * which would make resuming a conversation impossible.
+ */
+const NESTED_CLAUDE_ENV = [
+  'CLAUDECODE',
+  'CLAUDE_CODE_CHILD_SESSION',
+  'CLAUDE_CODE_SESSION_ID',
+  'CLAUDE_CODE_SESSION_ATTENDED',
+  'CLAUDE_CODE_ENTRYPOINT',
+  'CLAUDE_CODE_MESSAGING_SOCKET',
+  'CLAUDE_CODE_MESSAGING_TOKEN',
+  'CLAUDE_PID',
+  'CLAUDE_AGENT_SDK_VERSION'
+]
+
+/** Terminal sizes cross process boundaries; keep only usable values. */
+function sanitizeSize(
+  cols?: number,
+  rows?: number
+): { cols: number; rows: number } | undefined {
+  if (!Number.isFinite(cols) || !Number.isFinite(rows)) return undefined
+  const c = Math.floor(cols as number)
+  const r = Math.floor(rows as number)
+  if (c < 2 || r < 2 || c > 1000 || r > 500) return undefined
+  return { cols: c, rows: r }
+}
+
+function baseAgentEnv(): Record<string, string> {
+  const env = { ...(process.env as Record<string, string>) }
+  for (const key of NESTED_CLAUDE_ENV) delete env[key]
+  return env
+}
+
+async function hasJsonl(dir: string): Promise<boolean> {
+  try {
+    const entries = await fsp.readdir(dir, { recursive: true, withFileTypes: true })
+    return entries.some((entry) => entry.isFile() && entry.name.endsWith('.jsonl'))
+  } catch {
+    return false
+  }
+}
+
+/** How much of a transcript to scan; the first prompt is always near the top. */
+const TITLE_SCAN_BYTES = 128 * 1024
+const TITLE_MAX_LENGTH = 60
+
+/**
+ * Claude Code titles a conversation with its first user prompt. The transcript
+ * is JSONL, so read the head of the file and return the first usable message.
+ */
+async function firstPrompt(file: string): Promise<string | undefined> {
+  let handle: Awaited<ReturnType<typeof fsp.open>> | undefined
+  try {
+    handle = await fsp.open(file, 'r')
+    const buffer = Buffer.alloc(TITLE_SCAN_BYTES)
+    const { bytesRead } = await handle.read(buffer, 0, TITLE_SCAN_BYTES, 0)
+    const lines = buffer.subarray(0, bytesRead).toString('utf8').split('\n')
+    // The last line is incomplete when the scan stopped mid-file.
+    if (bytesRead === TITLE_SCAN_BYTES) lines.pop()
+    for (const line of lines) {
+      if (!line.trim()) continue
+      let entry: {
+        type?: string
+        isMeta?: boolean
+        isSidechain?: boolean
+        message?: { content?: unknown }
+      }
+      try {
+        entry = JSON.parse(line)
+      } catch {
+        continue
+      }
+      if (entry.type !== 'user' || entry.isMeta || entry.isSidechain) continue
+      const title = normalizeTitle(entry.message?.content)
+      if (title) return title
+    }
+    return undefined
+  } catch {
+    return undefined
+  } finally {
+    await handle?.close().catch(() => undefined)
+  }
+}
+
+/** Text of a user message, skipping injected context and tool results. */
+function normalizeTitle(content: unknown): string | undefined {
+  let raw = ''
+  if (typeof content === 'string') {
+    raw = content
+  } else if (Array.isArray(content)) {
+    raw = content
+      .map((part) => {
+        const block = part as { type?: string; text?: unknown }
+        return block?.type === 'text' && typeof block.text === 'string' ? block.text : ''
+      })
+      .filter(Boolean)
+      .join(' ')
+  }
+  const text = raw.replace(/\s+/g, ' ').trim()
+  if (!text) return undefined
+  // Slash commands, injected <system> context and meta notes are not titles.
+  if (text.startsWith('<') || text.startsWith('/') || text.startsWith('Caveat:')) return undefined
+  return text.length > TITLE_MAX_LENGTH ? `${text.slice(0, TITLE_MAX_LENGTH)}…` : text
+}
 
 /** Remove an existing [mcp_servers.<name>] table from a TOML document. */
 function stripMcpSection(toml: string, name: string): string {

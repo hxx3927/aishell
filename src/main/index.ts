@@ -119,6 +119,7 @@ async function bootstrap(): Promise<void> {
       sessionId: event.sessionId,
       sessionName: session?.name,
       host: session ? `${session.username}@${session.host}:${session.port}` : undefined,
+      connId: event.connId,
       agentSessionId: event.agentSessionId,
       profileId: runtime?.profileId,
       command: event.command,
@@ -128,7 +129,7 @@ async function bootstrap(): Promise<void> {
     })
   })
 
-  ssh.onAgentShellChange = (sessionId, open, reason) => {
+  ssh.onAgentShellChange = (connId, sessionId, open, reason) => {
     const session = store!.getSession(sessionId)
     auditStore.recordNote({
       kind: 'shell',
@@ -136,9 +137,10 @@ async function bootstrap(): Promise<void> {
       sessionName: session?.name,
       host: session ? `${session.host}:${session.port}` : undefined,
       action: open ? 'open' : 'close',
-      reason
+      reason,
+      payload: { connId }
     })
-    send('agent:shell', { sessionId, open, reason })
+    send('agent:shell', { connId, sessionId, open, reason })
   }
 
   try {

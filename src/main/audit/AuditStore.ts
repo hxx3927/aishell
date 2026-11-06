@@ -41,6 +41,8 @@ export interface IntentInput {
   sessionName: string
   host: string
   username: string
+  /** Connection instance the call ran on. */
+  connId?: string
   agentSessionId?: string
   profileId?: string
   tool: string
@@ -65,6 +67,7 @@ export interface BashInput {
   sessionId: string
   sessionName?: string
   host?: string
+  connId?: string
   agentSessionId?: string
   profileId?: string
   command: string
@@ -154,7 +157,8 @@ export class AuditStore {
         command: input.command,
         cwd: input.cwd,
         transport: input.transport,
-        hookSessionId: input.hookSessionId
+        hookSessionId: input.hookSessionId,
+        connId: input.connId
       }
     })
   }
@@ -386,6 +390,7 @@ function applyRecord(
         sessionName: String(record.sessionName ?? ''),
         host: String(record.host ?? ''),
         username: String(record.username ?? ''),
+        connId: optionalString(record.connId),
         agentSessionId: optionalString(record.agentSessionId),
         profileId: optionalString(record.profileId),
         tool: String(record.tool ?? ''),

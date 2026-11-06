@@ -89,12 +89,19 @@ const api: AishellApi = {
   },
 
   agent: {
-    launch: (sessionId, profileId) => ipcRenderer.invoke('agent:launch', sessionId, profileId),
+    launch: (sessionId, profileId, name, cols, rows) =>
+      ipcRenderer.invoke('agent:launch', sessionId, profileId, name, cols, rows),
+    resume: (agentSessionId, cols, rows) =>
+      ipcRenderer.invoke('agent:resume', agentSessionId, cols, rows),
+    history: (sessionId) => ipcRenderer.invoke('agent:history', sessionId),
+    titles: (sessionId) => ipcRenderer.invoke('agent:titles', sessionId),
+    forget: (agentSessionId) => ipcRenderer.invoke('agent:forget', agentSessionId),
+    list: (sessionId) => ipcRenderer.invoke('agent:list', sessionId),
     stop: (agentSessionId) => ipcRenderer.invoke('agent:stop', agentSessionId),
+    reconnect: (agentSessionId) => ipcRenderer.invoke('agent:reconnect', agentSessionId),
     input: (agentSessionId, data) => ipcRenderer.invoke('agent:input', agentSessionId, data),
     resize: (agentSessionId, cols, rows) =>
-      ipcRenderer.invoke('agent:resize', agentSessionId, cols, rows),
-    get: (sessionId) => ipcRenderer.invoke('agent:get', sessionId)
+      ipcRenderer.invoke('agent:resize', agentSessionId, cols, rows)
   },
 
   activity: {
@@ -102,7 +109,7 @@ const api: AishellApi = {
   },
 
   agentShell: {
-    close: (sessionId) => ipcRenderer.invoke('agentShell:close', sessionId)
+    close: (connId) => ipcRenderer.invoke('agentShell:close', connId)
   },
 
   audit: {

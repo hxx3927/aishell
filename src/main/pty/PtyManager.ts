@@ -30,8 +30,10 @@ export class PtyManager {
       cols: Math.max(2, Math.floor(options.cols) || 100),
       rows: Math.max(2, Math.floor(options.rows) || 30),
       cwd: options.cwd,
+      // Callers pass the complete environment. Merging process.env here would
+      // re-add variables the caller deliberately removed, such as Claude
+      // Code's nested-session markers.
       env: {
-        ...process.env,
         ...options.env,
         TERM: 'xterm-256color',
         COLORTERM: 'truecolor'

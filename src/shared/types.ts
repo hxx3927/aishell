@@ -104,15 +104,64 @@ export interface TransferProgress {
   error?: string
 }
 
-export interface AgentRuntime {
+/**
+ * One agent window. Agents are independent of terminal tabs: each window owns
+ * its SSH connection (`agent:<agentSessionId>`), MCP scope and persistent
+ * shell. The local workspace is shared by every window of the server session.
+ */
+export interface AgentSession {
   agentSessionId: string
   sessionId: string
+  /** Connection instance owned by this agent window. */
+  connId: string
+  /** Display name, defaults to "<profile> #n" per server. */
+  name: string
   profileId: string
   profileLabel: string
   status: 'starting' | 'running' | 'stopped' | 'error'
   error?: string
   workspace: string
+  createdAt: number
 }
+
+/**
+ * A launched agent window kept on disk after it ends. Reopening a record reuses
+ * its workspace and its own CLI session; the workspace is shared with the
+ * server's other windows, so the conversation is identified by `cliSessionId`.
+ */
+export interface AgentWindowRecord {
+  agentSessionId: string
+  sessionId: string
+  profileId: string
+  profileLabel: string
+  kind: AgentKind
+  name: string
+  /**
+   * Shared project directory of the server session. Every window of the same
+   * server runs here, which is what makes Claude Code treat them as one
+   * project; per-window files live under `.aishell/agents/<agentSessionId>/`.
+   */
+  workspace: string
+  /**
+   * Claude Code session id owned by this window. Windows of a server share one
+   * project, so «继续» must resume by id; `--continue` would pick whichever
+   * window talked last. Absent on windows created before this existed.
+   */
+  cliSessionId?: string
+  createdAt: number
+  /** Last launch or exit; orders the history list. */
+  lastActiveAt: number
+  endedAt?: number
+  endReason?: AgentExitReason
+}
+
+/** History row: a record plus whether the CLI has a conversation to resume. */
+export interface AgentWindowEntry extends AgentWindowRecord {
+  resumable: boolean
+}
+
+/** @deprecated Use AgentSession. */
+export type AgentRuntime = AgentSession
 
 export type ActivityStatus = 'running' | 'success' | 'error' | 'pending' | 'denied'
 
@@ -142,6 +191,8 @@ export interface AuditCall {
   sessionName: string
   host: string
   username: string
+  /** Connection instance the call ran on. */
+  connId?: string
   agentSessionId?: string
   profileId?: string
   tool: string
@@ -205,6 +256,7 @@ export interface AuditInfo {
 
 export interface AgentShellStateEvent {
   sessionId: string
+  connId: string
   open: boolean
   reason?: string
 }
@@ -226,6 +278,8 @@ export interface AppState {
   encryptionAvailable: boolean
   /** Sessions that currently hold an agent shell. */
   agentShells: string[]
+  /** Agent windows that survive a renderer reload. */
+  agents: AgentSession[]
 }
 
 export interface SshStateEvent {
@@ -254,7 +308,7 @@ export interface TermExitEvent {
 }
 
 export interface AgentStateEvent {
-  runtime: AgentRuntime
+  runtime: AgentSession
 }
 
 export interface AgentDataEvent {
@@ -262,9 +316,13 @@ export interface AgentDataEvent {
   data: string
 }
 
+export type AgentExitReason = 'exit' | 'stopped' | 'app_quit'
+
 export interface AgentExitEvent {
   agentSessionId: string
   code: number
+  /** Why the agent went away; user-initiated stops stay quiet in the UI. */
+  reason?: AgentExitReason
 }
 
 export interface NoticeEvent {

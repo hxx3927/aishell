@@ -5,9 +5,11 @@ import { sessionConnection, useAppStore } from '../state/store'
 export function StatusBar() {
   const tabs = useAppStore((s) => s.tabs)
   const activeTabId = useAppStore((s) => s.activeTabId)
+  const backgroundSessionId = useAppStore((s) => s.activeSessionId)
   const sessions = useAppStore((s) => s.sessions)
   const connections = useAppStore((s) => s.connections)
-  const runtimes = useAppStore((s) => s.agentRuntimes)
+  const agentSessions = useAppStore((s) => s.agentSessions)
+  const activeAgentId = useAppStore((s) => s.activeAgentId)
   const mcpPort = useAppStore((s) => s.mcpPort)
   const encryptionAvailable = useAppStore((s) => s.encryptionAvailable)
   const versions = useAppStore((s) => s.versions)
@@ -24,7 +26,8 @@ export function StatusBar() {
   }
 
   const activeTab = tabs.find((tab) => tab.id === activeTabId)
-  const session = sessions.find((item) => item.id === activeTab?.sessionId)
+  const sessionId = activeTab?.sessionId ?? backgroundSessionId
+  const session = sessions.find((item) => item.id === sessionId)
   // The active terminal tab shows its own connection; anything else (file
   // tab, picker) falls back to the session's healthiest one.
   const connection =
@@ -33,7 +36,14 @@ export function StatusBar() {
       : session
         ? sessionConnection(connections, session.id)
         : undefined
-  const runtime = session ? runtimes[session.id] : undefined
+  // Agents belong to the server, not to a particular terminal tab.
+  const sessionAgents = session
+    ? Object.values(agentSessions).filter((agent) => agent.sessionId === session.id)
+    : []
+  const agent =
+    sessionAgents.find((item) => item.agentSessionId === activeAgentId[session?.id ?? '']) ??
+    sessionAgents[0]
+  const runningAgents = sessionAgents.filter((item) => item.status === 'running').length
 
   const status = connection?.status ?? 'disconnected'
   const statusLabel =
@@ -81,15 +91,25 @@ export function StatusBar() {
 
       <div className="flex-1" />
 
-      {runtime && (
+      {agent && (
         <span
           className={`flex items-center gap-1 ${
-            runtime.status === 'running' ? 'text-accent-2' : ''
+            agent.status === 'running' ? 'text-accent-2' : ''
           }`}
+          title={
+            sessionAgents.length > 1
+              ? `${runningAgents}/${sessionAgents.length} 个 Agent 窗口运行中`
+              : undefined
+          }
         >
           <Cpu size={10} />
-          {runtime.profileLabel}
-          {runtime.status === 'running' ? ' · 运行中' : ''}
+          {agent.name}
+          {agent.status === 'running'
+            ? ' · 运行中'
+            : agent.status === 'starting'
+              ? ' · 启动中'
+              : ''}
+          {sessionAgents.length > 1 && ` · ${runningAgents}/${sessionAgents.length}`}
         </span>
       )}
 

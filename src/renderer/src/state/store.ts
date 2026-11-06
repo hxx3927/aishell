@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import type {
   ActivityEvent,
-  AgentRuntime,
+  AgentSession,
   ConnectionStatus,
   HostInfo,
   KnownHost,
@@ -88,11 +88,17 @@ interface AppStore {
   connections: Record<string, ConnectionState>
   tabs: Tab[]
   activeTabId: string | null
+  /** Server context that survives closing every tab while agents still run. */
+  activeSessionId: string | null
   panels: { sidebar: boolean; files: boolean; agent: boolean }
-  agentRuntimes: Record<string, AgentRuntime>
+  /** Agent windows, keyed by agentSessionId (not by connection). */
+  agentSessions: Record<string, AgentSession>
+  agentOrder: string[]
+  /** Which agent window each server's panel is showing. */
+  activeAgentId: Record<string, string | null>
   activities: ActivityEvent[]
   transfers: Record<string, TransferProgress>
-  /** Sessions whose agent currently holds a persistent shell. */
+  /** Connection instances whose agent currently holds a persistent shell. */
   agentShells: Record<string, boolean>
   auditOpen: boolean
   toasts: Toast[]
@@ -133,12 +139,14 @@ interface AppStore {
   openSessionEditor: (session?: Session, group?: string) => void
   closeSessionEditor: () => void
 
-  applyAgentState: (runtime: AgentRuntime) => void
-  clearAgentRuntime: (sessionId: string) => void
+  applyAgentState: (agent: AgentSession) => void
+  /** Drops one agent window after it stops or crashes. */
+  removeAgentSession: (agentSessionId: string) => void
+  setActiveAgent: (sessionId: string, agentSessionId: string | null) => void
   applyActivity: (event: ActivityEvent) => void
   applyTransfer: (transfer: TransferProgress) => void
   removeTransfer: (id: string) => void
-  setAgentShell: (sessionId: string, open: boolean) => void
+  setAgentShell: (connId: string, open: boolean) => void
   setAuditOpen: (open: boolean) => void
 
   pushToast: (level: Toast['level'], message: string) => void
@@ -172,19 +180,36 @@ const emptySettings: Settings = {
 }
 
 async function endSessionConnection(sessionId: string): Promise<void> {
-  const store = useAppStore.getState()
-  const runtime = store.agentRuntimes[sessionId]
-  if (runtime) {
-    await window.aishell.agent.stop(runtime.agentSessionId).catch(() => undefined)
-  }
-  store.clearAgentRuntime(sessionId)
+  const agents = Object.values(useAppStore.getState().agentSessions).filter(
+    (agent) => agent.sessionId === sessionId
+  )
+  await Promise.all(
+    agents.map((agent) =>
+      window.aishell.agent.stop(agent.agentSessionId).catch(() => undefined)
+    )
+  )
   await window.aishell.ssh.disconnect(sessionId).catch(() => undefined)
+  const removed = new Set(agents.map((agent) => agent.agentSessionId))
   useAppStore.setState((state) => {
     const connections = { ...state.connections }
+    const agentSessions = { ...state.agentSessions }
+    const agentShells = { ...state.agentShells }
     for (const [connId, connection] of Object.entries(connections)) {
       if (connection.sessionId === sessionId) delete connections[connId]
     }
-    return { connections }
+    for (const agent of agents) {
+      delete agentSessions[agent.agentSessionId]
+      delete agentShells[agent.connId]
+    }
+    const activeAgentId = { ...state.activeAgentId }
+    delete activeAgentId[sessionId]
+    return {
+      connections,
+      agentSessions,
+      agentShells,
+      activeAgentId,
+      agentOrder: state.agentOrder.filter((id) => !removed.has(id))
+    }
   })
 }
 
@@ -199,26 +224,39 @@ function closeTabNow(tabId: string): void {
   const tab = state.tabs.find((t) => t.id === tabId)
   if (!tab) return
   if (tab.kind === 'terminal' && tab.sessionId) {
-    const others = terminalTabsOf(state.tabs, tab.sessionId).filter((t) => t.id !== tabId)
-    void window.aishell.ssh.disconnectConn(tab.id).catch(() => undefined)
-    if (!others.length) {
-      // Last terminal of the server: the session goes with it.
-      void endSessionConnection(tab.sessionId)
-      state.removeSessionTabs(tab.sessionId)
+    const connId = tab.id.slice('term-'.length)
+    const sessionId = tab.sessionId
+    void window.aishell.ssh.disconnectConn(connId).catch(() => undefined)
+
+    const remainingTabs = state.tabs.filter((t) => t.id !== tabId)
+    const otherTerminals = remainingTabs.filter(
+      (t) => t.kind === 'terminal' && t.sessionId === sessionId
+    )
+    const hasAgents = Object.values(state.agentSessions).some(
+      (agent) => agent.sessionId === sessionId
+    )
+    if (!otherTerminals.length && !hasAgents) {
+      // Last window of the server: its file tabs lose their connection too.
+      void endSessionConnection(sessionId)
+      state.removeSessionTabs(sessionId)
       return
     }
-    const tabs = state.tabs.filter((t) => t.id !== tabId)
+    // Agents are independent windows; closing a terminal never stops them.
+    const tabs = remainingTabs
     const index = state.tabs.findIndex((t) => t.id === tabId)
     const activeTabId =
       state.activeTabId === tabId
         ? (tabs[Math.max(0, index - 1)]?.id ?? tabs[0]?.id ?? null)
         : state.activeTabId
-    useAppStore.setState({ tabs, activeTabId })
-    const connId = tab.id.slice('term-'.length)
+    // Closing the focused terminal leaves its server as the panel context when
+    // agent windows are still open there.
+    const nextActive = tabs.find((t) => t.id === activeTabId)
+    const activeSessionId =
+      state.activeTabId === tabId ? (nextActive?.sessionId ?? sessionId) : state.activeSessionId
     useAppStore.setState((s) => {
       const connections = { ...s.connections }
       delete connections[connId]
-      return { connections }
+      return { tabs, activeTabId, activeSessionId, connections }
     })
     return
   }
@@ -228,7 +266,13 @@ function closeTabNow(tabId: string): void {
     const index = state.tabs.findIndex((t) => t.id === tabId)
     activeTabId = tabs[Math.max(0, index - 1)]?.id ?? tabs[0]?.id ?? null
   }
-  useAppStore.setState({ tabs, activeTabId })
+  const nextActive = tabs.find((t) => t.id === activeTabId)
+  const hasAgents =
+    Boolean(tab.sessionId) &&
+    Object.values(state.agentSessions).some((agent) => agent.sessionId === tab.sessionId)
+  const activeSessionId =
+    nextActive?.sessionId ?? (hasAgents ? (tab.sessionId ?? null) : null)
+  useAppStore.setState({ tabs, activeTabId, activeSessionId })
 }
 
 export const useAppStore = create<AppStore>()((set, get) => ({
@@ -245,8 +289,11 @@ export const useAppStore = create<AppStore>()((set, get) => ({
   connections: {},
   tabs: [],
   activeTabId: null,
+  activeSessionId: null,
   panels: { sidebar: true, files: true, agent: true },
-  agentRuntimes: {},
+  agentSessions: {},
+  agentOrder: [],
+  activeAgentId: {},
   activities: [],
   transfers: {},
   agentShells: {},
@@ -258,6 +305,15 @@ export const useAppStore = create<AppStore>()((set, get) => ({
 
   async init() {
     const state = await window.aishell.getState()
+    const agentSessions = Object.fromEntries(
+      state.agents.map((agent) => [agent.agentSessionId, agent])
+    )
+    const activeAgentId: Record<string, string | null> = {}
+    for (const agent of state.agents) {
+      if (!(agent.sessionId in activeAgentId)) {
+        activeAgentId[agent.sessionId] = agent.agentSessionId
+      }
+    }
     set({
       ready: true,
       sessions: state.sessions,
@@ -268,7 +324,13 @@ export const useAppStore = create<AppStore>()((set, get) => ({
       versions: state.versions,
       userDataPath: state.userDataPath,
       encryptionAvailable: state.encryptionAvailable,
-      agentShells: Object.fromEntries(state.agentShells.map((id) => [id, true]))
+      agentShells: Object.fromEntries(state.agentShells.map((id) => [id, true])),
+      agentSessions,
+      agentOrder: state.agents.map((agent) => agent.agentSessionId),
+      activeAgentId,
+      // After a renderer reload there are no tabs yet; keep running agents
+      // reachable by opening their server's panel context.
+      activeSessionId: state.agents[0]?.sessionId ?? null
     })
     const activities = await window.aishell.activity.list()
     set({ activities })
@@ -344,7 +406,7 @@ export const useAppStore = create<AppStore>()((set, get) => ({
     const state = get()
     const existing = terminalTabsOf(state.tabs, session.id)[0]
     if (existing) {
-      set({ activeTabId: existing.id })
+      set({ activeTabId: existing.id, activeSessionId: session.id })
       return existing.id
     }
     // First tab of this server: it takes the primary connection id, which is
@@ -352,7 +414,8 @@ export const useAppStore = create<AppStore>()((set, get) => ({
     const id = `term-${session.id}`
     set((s) => ({
       tabs: [...s.tabs, { id, kind: 'terminal', sessionId: session.id, title: session.name }],
-      activeTabId: id
+      activeTabId: id,
+      activeSessionId: session.id
     }))
     return session.id
   },
@@ -363,7 +426,8 @@ export const useAppStore = create<AppStore>()((set, get) => ({
       tabs: state.tabs.some((t) => t.id === id)
         ? state.tabs
         : [...state.tabs, { id, kind: 'picker', title: '选择服务器' }],
-      activeTabId: id
+      activeTabId: id,
+      activeSessionId: null
     }))
   },
 
@@ -380,7 +444,8 @@ export const useAppStore = create<AppStore>()((set, get) => ({
           ? { id: termId, kind: 'terminal' as const, sessionId: session.id, title: session.name }
           : t
       ),
-      activeTabId: termId
+      activeTabId: termId,
+      activeSessionId: session.id
     }))
     return connId
   },
@@ -400,10 +465,11 @@ export const useAppStore = create<AppStore>()((set, get) => ({
             title: title ?? path.split('/').pop() ?? path
           }
         ],
-        activeTabId: id
+        activeTabId: id,
+        activeSessionId: sessionId
       }))
     } else {
-      set({ activeTabId: id })
+      set({ activeTabId: id, activeSessionId: sessionId })
     }
   },
 
@@ -412,13 +478,14 @@ export const useAppStore = create<AppStore>()((set, get) => ({
     const tab = state.tabs.find((t) => t.id === tabId)
     if (!tab) return
 
-    // Closing the last terminal of a session also closes its file tabs. Ask
-    // before discarding any unsaved edits, whichever entry point was used.
-    const lastTerminal =
+    // Closing the last window of a server also closes its file tabs. Agents
+    // are independent windows and keep the server alive on their own.
+    const lastWindow =
       tab.kind === 'terminal' &&
-      terminalTabsOf(state.tabs, tab.sessionId!).length === 1
+      terminalTabsOf(state.tabs, tab.sessionId!).length === 1 &&
+      !Object.values(state.agentSessions).some((agent) => agent.sessionId === tab.sessionId)
     const dirtyTabs =
-      lastTerminal
+      lastWindow
         ? state.tabs.filter(
             (t) => t.sessionId === tab.sessionId && t.kind === 'file' && t.dirty
           )
@@ -435,7 +502,7 @@ export const useAppStore = create<AppStore>()((set, get) => ({
       .confirm({
         title: closingTerminal ? '关闭终端' : '关闭文件',
         message: closingTerminal
-          ? `该会话还有 ${dirtyTabs.length} 个文件未保存，关闭终端会一并关闭它们。`
+          ? `该会话还有 ${dirtyTabs.length} 个文件未保存，关闭最后一个窗口会一并关闭它们。`
           : '文件有未保存的修改，确定关闭吗？',
         confirmText: '关闭',
         danger: true
@@ -448,19 +515,26 @@ export const useAppStore = create<AppStore>()((set, get) => ({
   removeSessionTabs(sessionId) {
     set((state) => {
       const index = state.tabs.findIndex((t) => t.sessionId === sessionId)
-      if (index === -1) return {}
+      if (index === -1) {
+        // The server may have had only agent windows; drop its panel context.
+        return state.activeSessionId === sessionId ? { activeSessionId: null } : {}
+      }
       const tabs = state.tabs.filter((t) => t.sessionId !== sessionId)
       const activeRemoved =
         state.activeTabId !== null && !tabs.some((t) => t.id === state.activeTabId)
       const activeTabId = activeRemoved
         ? (tabs[Math.max(0, index - 1)]?.id ?? tabs[0]?.id ?? null)
         : state.activeTabId
-      return { tabs, activeTabId }
+      const nextActive = tabs.find((t) => t.id === activeTabId)
+      return { tabs, activeTabId, activeSessionId: nextActive?.sessionId ?? null }
     })
   },
 
   setActiveTab(tabId) {
-    set({ activeTabId: tabId })
+    set((state) => {
+      const tab = state.tabs.find((t) => t.id === tabId)
+      return { activeTabId: tabId, activeSessionId: tab?.sessionId ?? null }
+    })
   },
 
   updateTab(tabId, patch) {
@@ -490,18 +564,73 @@ export const useAppStore = create<AppStore>()((set, get) => ({
     set({ sessionEditor: { open: false } })
   },
 
-  applyAgentState(runtime) {
-    set((state) => ({
-      agentRuntimes: { ...state.agentRuntimes, [runtime.sessionId]: runtime }
-    }))
+  applyAgentState(agent) {
+    set((state) => {
+      const exists = state.agentSessions[agent.agentSessionId]
+      const agentSessions = {
+        ...state.agentSessions,
+        [agent.agentSessionId]: agent
+      }
+      const agentOrder = exists
+        ? state.agentOrder
+        : [...state.agentOrder, agent.agentSessionId]
+      // A newly launched window takes focus; otherwise keep the user's pick.
+      const current = state.activeAgentId[agent.sessionId]
+      const currentExists = Boolean(current && agentSessions[current!])
+      const shouldFocus = agent.status === 'starting' || !currentExists
+      const activeAgentId = shouldFocus
+        ? { ...state.activeAgentId, [agent.sessionId]: agent.agentSessionId }
+        : state.activeAgentId
+      return { agentSessions, agentOrder, activeAgentId }
+    })
   },
 
-  clearAgentRuntime(sessionId) {
+  removeAgentSession(agentSessionId) {
     set((state) => {
-      const next = { ...state.agentRuntimes }
-      delete next[sessionId]
-      return { agentRuntimes: next }
+      const agent = state.agentSessions[agentSessionId]
+      if (!agent) return {}
+      const agentSessions = { ...state.agentSessions }
+      delete agentSessions[agentSessionId]
+      const agentOrder = state.agentOrder.filter((id) => id !== agentSessionId)
+      const agentShells = { ...state.agentShells }
+      delete agentShells[agent.connId]
+      const connections = { ...state.connections }
+      delete connections[agent.connId]
+      let activeAgentId = state.activeAgentId
+      if (state.activeAgentId[agent.sessionId] === agentSessionId) {
+        const next =
+          agentOrder.find((id) => agentSessions[id]?.sessionId === agent.sessionId) ?? null
+        activeAgentId = { ...state.activeAgentId, [agent.sessionId]: next }
+      }
+      // The last window of this server just closed: keep its panel context only
+      // while some tab (a terminal or file editor) still belongs to it.
+      let activeSessionId = state.activeSessionId
+      if (activeSessionId === agent.sessionId) {
+        const hasTerminal = state.tabs.some(
+          (tab) => tab.kind === 'terminal' && tab.sessionId === agent.sessionId
+        )
+        const hasAgentsLeft = agentOrder.some(
+          (id) => agentSessions[id]?.sessionId === agent.sessionId
+        )
+        if (!hasTerminal && !hasAgentsLeft) {
+          activeSessionId = state.tabs.find((tab) => tab.id === state.activeTabId)?.sessionId ?? null
+        }
+      }
+      return {
+        agentSessions,
+        agentOrder,
+        agentShells,
+        connections,
+        activeAgentId,
+        activeSessionId
+      }
     })
+  },
+
+  setActiveAgent(sessionId, agentSessionId) {
+    set((state) => ({
+      activeAgentId: { ...state.activeAgentId, [sessionId]: agentSessionId }
+    }))
   },
 
   applyActivity(event) {
@@ -529,11 +658,11 @@ export const useAppStore = create<AppStore>()((set, get) => ({
     })
   },
 
-  setAgentShell(sessionId, open) {
+  setAgentShell(connId, open) {
     set((state) => {
       const next = { ...state.agentShells }
-      if (open) next[sessionId] = true
-      else delete next[sessionId]
+      if (open) next[connId] = true
+      else delete next[connId]
       return { agentShells: next }
     })
   },

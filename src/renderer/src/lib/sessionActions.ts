@@ -36,16 +36,40 @@ export async function connectInTab(tabId: string, session: Session): Promise<voi
 
 export async function disconnectSession(session: Session): Promise<void> {
   const store = useAppStore.getState()
-  const runtime = store.agentRuntimes[session.id]
-  if (runtime) {
-    await window.aishell.agent.stop(runtime.agentSessionId).catch(() => undefined)
-  }
+  // Each agent window owns a connection, so stop every one of them.
+  const agents = Object.values(store.agentSessions).filter(
+    (agent) => agent.sessionId === session.id
+  )
+  await Promise.all(
+    agents.map((agent) =>
+      window.aishell.agent.stop(agent.agentSessionId).catch(() => undefined)
+    )
+  )
   await window.aishell.ssh.disconnect(session.id)
   // Disconnecting tears down the session, so its tabs no longer have a
   // backing connection — close them along with it.
   const current = useAppStore.getState()
   current.removeSessionTabs(session.id)
-  current.clearAgentRuntime(session.id)
+  const removed = new Set(agents.map((agent) => agent.agentSessionId))
+  useAppStore.setState((state) => {
+    const agentSessions = { ...state.agentSessions }
+    const agentShells = { ...state.agentShells }
+    const connections = { ...state.connections }
+    for (const agent of agents) {
+      delete agentSessions[agent.agentSessionId]
+      delete agentShells[agent.connId]
+      delete connections[agent.connId]
+    }
+    const activeAgentId = { ...state.activeAgentId }
+    delete activeAgentId[session.id]
+    return {
+      agentSessions,
+      agentShells,
+      connections,
+      activeAgentId,
+      agentOrder: state.agentOrder.filter((id) => !removed.has(id))
+    }
+  })
 }
 
 export async function deleteSession(session: Session): Promise<void> {

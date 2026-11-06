@@ -1,5 +1,5 @@
 import { app } from 'electron'
-import { join, resolve as resolveLocalPath, sep } from 'node:path'
+import { resolve as resolveLocalPath, sep } from 'node:path'
 import type { ExecResult, Session } from '@shared/types'
 import type { SessionStore } from '../store/SessionStore'
 import type { SshManager } from '../ssh/SshManager'
@@ -8,7 +8,7 @@ import type { AuditStore } from '../audit/AuditStore'
 import { captureSnapshot } from '../audit/snapshot'
 import { clipOutput, sha256 } from '../audit/redact'
 import type { ActivityLog } from './activity'
-import { isDangerousCommand, truncateText } from '../util'
+import { isDangerousCommand, sessionWorkspacePath, truncateText } from '../util'
 
 export interface ToolDefinition {
   name: string
@@ -22,14 +22,25 @@ export interface ToolDefinition {
 interface ToolContext {
   scopedSessionId: string
   sessionId: string
+  /**
+   * What SSH operations address: the bound connection instance, or the session
+   * for cross-session calls. Both are valid SshManager targets.
+   */
+  target: string
+  connId?: string
+  agentSessionId?: string
   ssh: SshManager
   store: SessionStore
 }
 
-/** Who is calling: the session the MCP URL is bound to and, if known, the agent. */
+/**
+ * Who is calling: the session the MCP URL is bound to, the agent, and the
+ * connection instance the agent is bound to.
+ */
 export interface McpScope {
   sessionId: string
   agentSessionId?: string
+  connId?: string
 }
 
 export type AgentResolver = (agentSessionId: string) => { profileId: string } | undefined
@@ -99,6 +110,10 @@ export class ToolRegistry {
     if (!session) throw new Error(`会话不存在：${sessionId}`)
 
     const crossSession = Boolean(scopedSessionId) && sessionId !== scopedSessionId
+    // The agent is bound to one connection instance; a call aimed at another
+    // session has no instance to target there.
+    const connId = crossSession ? undefined : scope.connId
+    const target = connId ?? sessionId
     // A tag for the audit log only: AIShell does not block or ask about any
     // command, that is the agent's own responsibility.
     const dangerous =
@@ -120,6 +135,7 @@ export class ToolRegistry {
           sessionName: session.name,
           host,
           username: session.username,
+          connId,
           agentSessionId,
           profileId,
           tool: name,
@@ -140,6 +156,7 @@ export class ToolRegistry {
     if (dangerous && tool.destructive) {
       void captureSnapshot(this.ssh, this.store, this.audit, {
         sessionId,
+        connId,
         trigger: 'before_dangerous',
         agentSessionId,
         profileId,
@@ -153,6 +170,9 @@ export class ToolRegistry {
       const result = await tool.handler(args, {
         scopedSessionId,
         sessionId,
+        target,
+        connId,
+        agentSessionId,
         ssh: this.ssh,
         store: this.store
       })
@@ -241,19 +261,23 @@ function bool(args: Record<string, unknown>, key: string, fallback = false): boo
   return typeof value === 'boolean' ? value : fallback
 }
 
-function workspaceDir(sessionId: string): string {
-  return join(app.getPath('userData'), 'workspaces', sessionId)
+/**
+ * Local workspace of the calling server session. Every agent window of a
+ * server runs in this same directory, so local file tools may reach all of it.
+ */
+function workspaceDir(ctx: ToolContext): string {
+  return sessionWorkspacePath(app.getPath('userData'), ctx.scopedSessionId || ctx.sessionId)
 }
 
-function assertLocalWriteAllowed(sessionId: string, target: string): void {
+function assertLocalWriteAllowed(ctx: ToolContext, target: string): void {
   const abs = resolveLocalPath(target)
-  const allowedRoots = [workspaceDir(sessionId), app.getPath('downloads')].map((p) =>
+  const allowedRoots = [workspaceDir(ctx), app.getPath('downloads')].map((p) =>
     resolveLocalPath(p)
   )
   const allowed = allowedRoots.some((root) => abs === root || abs.startsWith(root + sep))
   if (!allowed) {
     throw new Error(
-      `出于安全考虑，下载目标必须位于 Agent 工作区或系统下载目录：${workspaceDir(sessionId)} 或 ${app.getPath('downloads')}`
+      `出于安全考虑，下载目标必须位于 Agent 工作区或系统下载目录：${workspaceDir(ctx)} 或 ${app.getPath('downloads')}`
     )
   }
 }
@@ -300,7 +324,7 @@ function buildTools(): ToolDefinition[] {
         additionalProperties: false
       },
       async handler(_args, ctx) {
-        const info = ctx.ssh.getSessionInfo(ctx.sessionId)
+        const info = ctx.ssh.getSessionInfo(ctx.target)
         return {
           session_id: info.session.id,
           name: info.session.name,
@@ -351,7 +375,7 @@ function buildTools(): ToolDefinition[] {
         additionalProperties: false
       },
       async handler(args, ctx) {
-        const result = await ctx.ssh.exec(ctx.sessionId, str(args, 'command'), {
+        const result = await ctx.ssh.exec(ctx.target, str(args, 'command'), {
           cwd: str(args, 'cwd') || undefined,
           timeoutSec: num(args, 'timeout_sec', 60)
         })
@@ -376,7 +400,7 @@ function buildTools(): ToolDefinition[] {
         additionalProperties: false
       },
       async handler(args, ctx) {
-        await ctx.ssh.writeFile(ctx.sessionId, str(args, 'path'), str(args, 'content'), {
+        await ctx.ssh.writeFile(ctx.target, str(args, 'path'), str(args, 'content'), {
           backup: bool(args, 'create_backup', true)
         })
         return { ok: true, path: str(args, 'path') }
@@ -398,7 +422,7 @@ function buildTools(): ToolDefinition[] {
         additionalProperties: false
       },
       async handler(args, ctx) {
-        await ctx.ssh.upload(ctx.sessionId, str(args, 'local_path'), str(args, 'remote_path'))
+        await ctx.ssh.upload(ctx.target, str(args, 'local_path'), str(args, 'remote_path'))
         return { ok: true }
       }
     },
@@ -421,8 +445,8 @@ function buildTools(): ToolDefinition[] {
       async handler(args, ctx) {
         const target = str(args, 'local_path')
         if (!target) throw new Error('缺少 local_path')
-        assertLocalWriteAllowed(ctx.sessionId, target)
-        await ctx.ssh.download(ctx.sessionId, str(args, 'remote_path'), target)
+        assertLocalWriteAllowed(ctx, target)
+        await ctx.ssh.download(ctx.target, str(args, 'remote_path'), target)
         return { ok: true, local_path: target }
       }
     },
@@ -438,7 +462,7 @@ function buildTools(): ToolDefinition[] {
         additionalProperties: false
       },
       async handler(_args, ctx) {
-        const { reused } = await ctx.ssh.openAgentShell(ctx.sessionId)
+        const { reused } = await ctx.ssh.openAgentShell(ctx.target)
         return { ok: true, reused, idle_timeout_minutes: 30 }
       }
     },
@@ -463,7 +487,7 @@ function buildTools(): ToolDefinition[] {
       },
       async handler(args, ctx) {
         return ctx.ssh
-          .getAgentShell(ctx.sessionId)
+          .getAgentShell(ctx.target)
           .run(str(args, 'command'), clampSec(num(args, 'timeout_sec', 60)))
       }
     },
@@ -483,7 +507,7 @@ function buildTools(): ToolDefinition[] {
       },
       async handler(args, ctx) {
         return ctx.ssh
-          .getAgentShell(ctx.sessionId)
+          .getAgentShell(ctx.target)
           .read(clampSec(num(args, 'timeout_sec', 30)))
       }
     },
@@ -498,7 +522,7 @@ function buildTools(): ToolDefinition[] {
         additionalProperties: false
       },
       async handler(_args, ctx) {
-        return ctx.ssh.getAgentShell(ctx.sessionId).interrupt()
+        return ctx.ssh.getAgentShell(ctx.target).interrupt()
       }
     },
     {
@@ -513,7 +537,7 @@ function buildTools(): ToolDefinition[] {
         additionalProperties: false
       },
       async handler(_args, ctx) {
-        return { ok: true, closed: ctx.ssh.closeAgentShell(ctx.sessionId, 'agent') }
+        return { ok: true, closed: ctx.ssh.closeAgentShell(ctx.target, 'agent') }
       }
     }
   ]

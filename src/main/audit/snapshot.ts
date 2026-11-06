@@ -12,6 +12,8 @@ const PROBES = {
 
 export interface SnapshotInput {
   sessionId: string
+  /** Connection instance to probe; defaults to the session's best instance. */
+  connId?: string
   trigger: 'agent_launch' | 'before_dangerous'
   agentSessionId?: string
   profileId?: string
@@ -29,14 +31,16 @@ export async function captureSnapshot(
   audit: AuditStore,
   input: SnapshotInput
 ): Promise<void> {
-  if (!ssh.isConnected(input.sessionId)) return
+  const target = input.connId ?? input.sessionId
+  const up = input.connId ? ssh.isConnConnected(input.connId) : ssh.isConnected(input.sessionId)
+  if (!up) return
   const session = store.getSession(input.sessionId)
   const raw: Record<string, string> = {}
 
   await Promise.all(
     Object.entries(PROBES).map(async ([key, command]) => {
       try {
-        const result = await ssh.exec(input.sessionId, command, { timeoutSec: 10 })
+        const result = await ssh.exec(target, command, { timeoutSec: 10 })
         raw[key] = (result.stdout || result.stderr).trim()
       } catch (err) {
         raw[key] = `失败：${(err as Error).message}`

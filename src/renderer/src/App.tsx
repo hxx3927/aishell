@@ -9,6 +9,7 @@ import {
   Terminal as TerminalIcon
 } from 'lucide-react'
 import { useEffect, type ReactNode } from 'react'
+import type { Session } from '@shared/types'
 import { useAppStore } from './state/store'
 import { connectSession } from './lib/sessionActions'
 import { Sidebar } from './components/Sidebar'
@@ -90,6 +91,31 @@ function Welcome() {
               </button>
             ))
           )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/** The server has no tabs left, but its agent windows are still running. */
+function AgentOnlyWorkspace({ session }: { session: Session }) {
+  const count = useAppStore(
+    (state) =>
+      state.agentOrder.filter((id) => state.agentSessions[id]?.sessionId === session.id).length
+  )
+
+  return (
+    <div className="flex h-full items-center justify-center px-8 text-center">
+      <div className="max-w-[420px]">
+        <div className="mx-auto flex h-11 w-11 items-center justify-center rounded-xl bg-gradient-to-br from-accent to-accent-2 text-white">
+          <Sparkles size={18} />
+        </div>
+        <div className="mt-3 text-sm font-medium text-ink">{session.name}</div>
+        <div className="mt-1 text-xs text-dim">
+          该服务器还有 {count} 个 Agent 窗口，在右侧面板继续操作。
+        </div>
+        <div className="mt-2 text-[11px] leading-relaxed text-faint">
+          关闭全部 Agent 窗口后这里会回到欢迎页；需要终端时从左侧连接栏重新打开。
         </div>
       </div>
     </div>
@@ -178,8 +204,10 @@ export default function App() {
   const sessions = useAppStore((s) => s.sessions)
   const theme = useAppStore((s) => s.settings.theme)
 
+  const backgroundSessionId = useAppStore((s) => s.activeSessionId)
   const activeTab = tabs.find((tab) => tab.id === activeTabId)
-  const activeSessionId = activeTab?.sessionId
+  // The focused tab wins; with no tabs, an agent-only server keeps its panel.
+  const activeSessionId = activeTab?.sessionId ?? backgroundSessionId ?? undefined
   const activeSession = sessions.find((session) => session.id === activeSessionId)
 
   useEffect(() => {
@@ -188,12 +216,23 @@ export default function App() {
     const unsubs = [
       window.aishell.on('ssh:state', (event) => {
         const store = useAppStore.getState()
+        // A stopped agent tears down its connection; ignore the trailing
+        // disconnect so it does not resurrect a stale entry.
+        if (
+          event.connId.startsWith('agent:') &&
+          event.status === 'disconnected' &&
+          !Object.values(store.agentSessions).some(
+            (agent) => agent.connId === event.connId
+          )
+        ) {
+          return
+        }
         store.setConnection(event.connId, event.sessionId, {
           status: event.status,
           error: event.error,
           hostInfo: event.hostInfo
         })
-        if (event.status === 'connected') {
+        if (event.status === 'connected' && !event.connId.startsWith('agent:')) {
           void window.aishell.ssh
             .ping(event.sessionId)
             .then((ms) => useAppStore.getState().setLatency(event.connId, ms))
@@ -210,13 +249,19 @@ export default function App() {
         useAppStore.getState().applyAgentState(event.runtime)
       }),
       window.aishell.on('agent:exit', (event) => {
+        const store = useAppStore.getState()
+        const agent = store.agentSessions[event.agentSessionId]
+        store.removeAgentSession(event.agentSessionId)
+        if (event.reason !== 'exit') return
         if (event.code !== 0) {
-          useAppStore.getState().pushToast('warn', 'Agent 进程已退出')
+          store.pushToast('warn', `${agent?.name ?? 'Agent'} 已退出（代码 ${event.code}）`)
+        } else if (agent) {
+          store.pushToast('info', `${agent.name} 已结束`)
         }
       }),
       window.aishell.on('agent:shell', (event) => {
         const store = useAppStore.getState()
-        store.setAgentShell(event.sessionId, event.open)
+        store.setAgentShell(event.connId, event.open)
         if (!event.open && event.reason === 'idle') {
           store.pushToast('info', 'Agent 持久 shell 空闲 30 分钟，已自动关闭')
         }
@@ -234,6 +279,9 @@ export default function App() {
       const store = useAppStore.getState()
       for (const [connId, connection] of Object.entries(store.connections)) {
         if (connection.status !== 'connected') continue
+        // Agent windows do not need their own latency probe; the server's
+        // terminal connection already covers it.
+        if (connId.startsWith('agent:')) continue
         void window.aishell.ssh
           .ping(connection.sessionId)
           .then((ms) => useAppStore.getState().setLatency(connId, ms))
@@ -310,7 +358,11 @@ export default function App() {
           <div className="flex min-h-0 flex-1 flex-col">
             <div className="relative min-h-0 flex-1 overflow-hidden">
               {tabs.length === 0 ? (
-                <Welcome />
+                activeSession ? (
+                  <AgentOnlyWorkspace session={activeSession} />
+                ) : (
+                  <Welcome />
+                )
               ) : (
                 tabs.map((tab) => {
                   if (tab.kind === 'terminal' && tab.sessionId) {
@@ -351,7 +403,13 @@ export default function App() {
           </div>
         </main>
 
-        {panels.agent && activeSessionId && <AgentPanel sessionId={activeSessionId} />}
+        {activeSessionId && (
+          // Stay mounted while collapsed so agent terminals keep their
+          // scrollback; AgentTerminal ignores the zero-sized fit.
+          <div className={panels.agent ? 'contents' : 'hidden'}>
+            <AgentPanel key={activeSessionId} sessionId={activeSessionId} />
+          </div>
+        )}
       </div>
 
       <StatusBar />

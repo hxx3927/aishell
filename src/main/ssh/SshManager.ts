@@ -58,8 +58,12 @@ export class SshManager {
   private runtimes = new Map<string, Runtime>()
 
   /** Called whenever an agent shell opens or closes (including idle and disconnect). */
-  onAgentShellChange: (sessionId: string, open: boolean, reason?: string) => void = () =>
-    undefined
+  onAgentShellChange: (
+    connId: string,
+    sessionId: string,
+    open: boolean,
+    reason?: string
+  ) => void = () => undefined
 
   constructor(
     private readonly store: SessionStore,
@@ -100,10 +104,25 @@ export class SshManager {
     return fallback
   }
 
-  private getRuntime(sessionId: string): Runtime {
-    const rt = this.runtimeForSession(sessionId)
+  /**
+   * Resolves a target that is either a session id or a connection instance id.
+   * Both are keys in `runtimes` (the primary instance's id is the session id),
+   * so an exact match wins and a session id falls back to any instance.
+   */
+  private runtimeForTarget(target: string): Runtime | undefined {
+    return this.runtimes.get(target) ?? this.runtimeForSession(target)
+  }
+
+  private getRuntime(target: string): Runtime {
+    const rt = this.runtimeForTarget(target)
     if (!rt) throw new Error('会话不存在或已断开')
     return rt
+  }
+
+  /** True when this exact connection instance is up. */
+  isConnConnected(connId: string): boolean {
+    const rt = this.runtimes.get(connId)
+    return Boolean(rt && rt.status === 'connected' && rt.client)
   }
 
   private requireConnected(sessionId: string): Runtime {
@@ -138,12 +157,12 @@ export class SshManager {
     )
   }
 
-  getStatus(sessionId: string): ConnectionStatus {
-    return this.runtimeForSession(sessionId)?.status ?? 'disconnected'
+  getStatus(target: string): ConnectionStatus {
+    return this.runtimeForTarget(target)?.status ?? 'disconnected'
   }
 
-  getHostInfo(sessionId: string): HostInfo {
-    return this.runtimeForSession(sessionId)?.hostInfo ?? {}
+  getHostInfo(target: string): HostInfo {
+    return this.runtimeForTarget(target)?.hostInfo ?? {}
   }
 
   listConnected(): Array<{ session: Session; status: ConnectionStatus; hostInfo: HostInfo }> {
@@ -451,39 +470,40 @@ export class SshManager {
     rt.shell = null
   }
 
-  hasAgentShell(sessionId: string): boolean {
-    return Boolean(this.runtimeForSession(sessionId)?.agentShell?.isOpen)
+  hasAgentShell(target: string): boolean {
+    return Boolean(this.runtimeForTarget(target)?.agentShell?.isOpen)
   }
 
+  /** Connection instance ids that currently hold an agent shell. */
   listAgentShells(): string[] {
     return Array.from(this.runtimes.values())
       .filter((rt) => rt.agentShell?.isOpen)
-      .map((rt) => rt.session.id)
+      .map((rt) => rt.id)
   }
 
-  getAgentShell(sessionId: string): AgentShell {
-    const shell = this.runtimeForSession(sessionId)?.agentShell
+  getAgentShell(target: string): AgentShell {
+    const shell = this.runtimeForTarget(target)?.agentShell
     if (!shell?.isOpen) throw new Error('持久 shell 未打开，请先调用 shell_open')
     return shell
   }
 
   /** Opens the agent shell, or returns the one already open. */
-  async openAgentShell(sessionId: string): Promise<{ shell: AgentShell; reused: boolean }> {
-    const rt = this.requireConnected(sessionId)
+  async openAgentShell(target: string): Promise<{ shell: AgentShell; reused: boolean }> {
+    const rt = this.requireConnected(target)
     if (rt.agentShell?.isOpen) return { shell: rt.agentShell, reused: true }
     const shell = await AgentShell.open(rt.client!, {
       onClose: (reason) => {
         if (rt.agentShell === shell) rt.agentShell = null
-        this.onAgentShellChange(sessionId, false, reason)
+        this.onAgentShellChange(rt.id, rt.session.id, false, reason)
       }
     })
     rt.agentShell = shell
-    this.onAgentShellChange(sessionId, true)
+    this.onAgentShellChange(rt.id, rt.session.id, true)
     return { shell, reused: false }
   }
 
-  closeAgentShell(sessionId: string, reason = 'closed'): boolean {
-    const shell = this.runtimeForSession(sessionId)?.agentShell
+  closeAgentShell(target: string, reason = 'closed'): boolean {
+    const shell = this.runtimeForTarget(target)?.agentShell
     if (!shell?.isOpen) return false
     shell.close(reason)
     return true

@@ -1,6 +1,7 @@
 import {
   Activity as ActivityIcon,
   AlertTriangle,
+  ArrowRightFromLine,
   Bot,
   Loader2,
   Play,
@@ -500,7 +501,7 @@ export function AgentPanel({ sessionId }: AgentPanelProps) {
             title="折叠 Agent 面板"
             onClick={() => togglePanel('agent', false)}
           >
-            <TerminalIcon size={12} className="rotate-90" />
+            <ArrowRightFromLine size={12} />
           </button>
         </div>
 

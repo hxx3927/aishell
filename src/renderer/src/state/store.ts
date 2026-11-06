@@ -720,7 +720,9 @@ export const useAppStore = create<AppStore>()((set, get) => ({
     const existing = terminalTabsOf(state.tabs, session.id)[0]
     if (existing) {
       set({ activeTabId: existing.id, activeSessionId: session.id })
-      return existing.id
+      // The tab id carries the connection instance id; returning the tab id
+      // would make the caller open a second, tab-less connection.
+      return existing.id.slice('term-'.length)
     }
     // First tab of this server: it takes the primary connection id, which is
     // the session id itself.

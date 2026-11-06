@@ -100,20 +100,27 @@ export function formatPermissions(mode: number): string {
   return out
 }
 
+/**
+ * Best-effort "this line can destroy the host" heuristic, used to tag audit
+ * records and take a pre-flight snapshot. It is deliberately narrow: a scoped
+ * delete is the agent's judgement call, so only the filesystem root counts.
+ * The command is lowercased first, which is why the patterns spell `-r`.
+ */
 export function isDangerousCommand(command: string): boolean {
   const normalized = command.replace(/\s+/g, ' ').trim().toLowerCase()
   const patterns = [
-    /rm\s+(-[a-z]*\s+)*-?[a-z]*r[a-z]*f?[a-z]*\s+\/(\s|$)/,
-    /rm\s+-[a-z]*r[a-z]*f[a-z]*\s+\/(\s|$)/,
+    // rm with a recursive flag aimed at `/`, anywhere in the line:
+    // `rm -rf /`, `rm -r -f /`, `rm --recursive /`, `cd /tmp && rm -rf /`.
+    /\brm\b(?=[^\n]*\s-{1,2}[a-z]*r)[^\n]*\s+["']?\/(?:\*)?["']?(?=\s|$)/,
     /\bmkfs(\.\w+)?\b/,
     /\bdd\b[^\n]*\bof=\/dev\//,
-    /\bshutdown\b/,
-    /\breboot\b/,
-    /\bpoweroff\b/,
-    /\bhalt\b/,
+    // Power commands only count at the start of a command segment, so
+    // `grep reboot /var/log/messages` is not a reboot.
+    /(?:^|[;&|]\s*|\bsudo\s+)(?:shutdown|reboot|poweroff|halt)\b/,
+    /\bsystemctl\s+(?:reboot|poweroff|halt)\b/,
     /:\(\)\s*\{\s*:\|:&\s*\}\s*;?\s*:/,
-    /\bchmod\s+-R\s+777\s+\/(\s|$)/,
-    /\bchown\s+-R\b[^\n]*\s+\/(\s|$)/
+    /\bchmod\s+-{1,2}[a-z]*r[a-z]*\s+777\s+["']?\/(?:\*)?["']?(?=\s|$)/,
+    /\bchown\s+-{1,2}[a-z]*r[a-z]*\s+[^\n]*\s+["']?\/(?:\*)?["']?(?=\s|$)/
   ]
   return patterns.some((re) => re.test(normalized))
 }

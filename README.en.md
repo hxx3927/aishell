@@ -173,10 +173,10 @@ See [docs/audit-and-persistent-shell.md](docs/audit-and-persistent-shell.md) for
 
 ```bash
 npm run dev          # development
-npm run typecheck    # type-check main and renderer
+npm run typecheck    # type-check main, renderer and test scripts
 npm run build        # build into out/
 npm run build:win    # type-check + build + NSIS installer
-npm test             # AuditStore unit test (no Electron)
+npm test             # unit + integration tests (spawns mock SSH, no Electron)
 ```
 
 ### MCP smoke test
@@ -200,16 +200,15 @@ In PowerShell, set `$env:AISHELL_MCP_URL="..."` and `$env:AISHELL_MCP_TOKEN="...
 <details>
 <summary>Sentinel protocol tests against the mock SSH server and local bash</summary>
 
+`test-agent-shell` / `test-ssh-manager` start the mock server on a free port
+themselves; start one manually and pass `MOCK_SSH_PORT` to reuse it:
+
 ```bash
-MOCK_SSH_PORT=2299 node scripts/mock-ssh-server.mjs &
+MOCK_SSH_PORT=2299 node tests/mock-ssh-server.mjs &
 
-npx esbuild scripts/test-agent-shell.mts --bundle --platform=node \
-  --format=esm --external:ssh2 --outfile=scripts/.tmp-test.mjs
-MOCK_SSH_PORT=2299 node scripts/.tmp-test.mjs
-
-npx esbuild scripts/test-agent-shell-bash.mts --bundle --platform=node \
-  --format=esm --external:ssh2 --outfile=scripts/.tmp-bash.mjs
-node scripts/.tmp-bash.mjs
+npm run test:agent-shell   # prefix with MOCK_SSH_PORT=2299 to reuse the server
+npm run test:ssh           # SshManager: connect, exec, shell, timeout, disconnect
+npm run test:agent-shell-bash
 ```
 
 </details>
@@ -232,7 +231,8 @@ src/
 ├─ preload/       contextBridge allow-list API
 ├─ renderer/      React UI (sessions, terminal, files, agent, settings)
 └─ shared/        types shared by main and renderer
-scripts/          mock SSH server, MCP smoke, unit tests, CDP driver, screenshot tools
+tests/            unit/integration tests, mock SSH server, manual probes
+scripts/          MCP smoke, CDP driver, icon and screenshot tools
 docs/             architecture, audit design, verification, screenshots, design mockups
 build/            app icons and packaging resources
 ```

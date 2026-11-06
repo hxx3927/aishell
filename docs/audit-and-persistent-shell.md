@@ -216,8 +216,8 @@ Agent 工作区的 `CLAUDE.md` / `AGENTS.md` 写明：何时用 `exec`、何时�
 | `src/renderer/.../AuditDialog.tsx` | 审计查询 / 详情 / 导出弹窗 |
 | `src/renderer/.../AgentPanel.tsx` | shell 状态标识、审计入口 |
 | `src/renderer/.../SettingsDialog.tsx` | 留存天数、审计目录大小、打开目录 / 查看审计 |
-| `scripts/test-audit-store.mts` | `AuditStore` 单测（不启动 Electron） |
-| `scripts/test-agent-shell*.mts` | `AgentShell` 哨兵协议测试（mock SSH + 本地 bash） |
+| `tests/test-audit-store.mts` | `AuditStore` 单测（不启动 Electron） |
+| `tests/test-agent-shell*.mts` | `AgentShell` 哨兵协议测试（mock SSH + 本地 bash） |
 | `scripts/mcp-smoke.mjs` | MCP 冒烟（含 shell 模式与审计断言） |
 
 ---

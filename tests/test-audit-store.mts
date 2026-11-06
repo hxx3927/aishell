@@ -5,10 +5,10 @@
  * Never touches real audit logs: the store writes to a throwaway directory
  * via AISHELL_AUDIT_TEST_DIR.
  *
- *   npx esbuild scripts/test-audit-store.mts \
+ *   npx esbuild tests/test-audit-store.mts \
  *     --bundle --platform=node --format=cjs --external:electron \
- *     --outfile=scripts/.tmp-audit-store.cjs
- *   node scripts/.tmp-audit-store.cjs
+ *     --outfile=tests/.tmp-audit-store.cjs
+ *   node tests/.tmp-audit-store.cjs
  */
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'

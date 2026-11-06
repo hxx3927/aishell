@@ -10,8 +10,8 @@ dist/
 *.tsbuildinfo
 
 # Local test artifacts
-scripts/.tmp-*
-scripts/.mock-ssh-host-key
+tests/.tmp-*
+tests/.mock-ssh-host-key
 scripts/shots/
 
 # Logs and OS files

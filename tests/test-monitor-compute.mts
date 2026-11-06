@@ -3,9 +3,9 @@
  * rates, per-process CPU% from tick deltas, the top-N union, and the history
  * ring. Pure functions, no timer or SSH involved.
  *
- *   npx esbuild scripts/test-monitor-compute.mts --bundle --platform=node \
- *     --format=cjs --outfile=scripts/.tmp-monitor-compute.cjs
- *   node scripts/.tmp-monitor-compute.cjs
+ *   npx esbuild tests/test-monitor-compute.mts --bundle --platform=node \
+ *     --format=cjs --outfile=tests/.tmp-monitor-compute.cjs
+ *   node tests/.tmp-monitor-compute.cjs
  */
 import {
   appendHistory,

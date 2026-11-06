@@ -2,9 +2,9 @@
  * Monitor probe parsers: /proc/stat deltas, meminfo, df with spaces and
  * duplicates, /proc/net/dev, host metadata and the non-Linux rejection.
  *
- *   npx esbuild scripts/test-monitor-parse.mts --bundle --platform=node \
- *     --format=cjs --outfile=scripts/.tmp-monitor-parse.cjs
- *   node scripts/.tmp-monitor-parse.cjs
+ *   npx esbuild tests/test-monitor-parse.mts --bundle --platform=node \
+ *     --format=cjs --outfile=tests/.tmp-monitor-parse.cjs
+ *   node tests/.tmp-monitor-parse.cjs
  */
 import {
   parseCaps,

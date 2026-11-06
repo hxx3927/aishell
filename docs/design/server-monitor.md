@@ -450,9 +450,9 @@ src/renderer/src/state/store.ts       标签页类型、监控状态与历史
 src/renderer/src/App.tsx              渲染 monitor 标签、事件订阅
 src/renderer/src/components/TabBar.tsx
 src/renderer/src/components/Sidebar.tsx
-scripts/mock-ssh-server.mjs          返回可波动的模拟指标
-scripts/test-monitor-parse.mts       解析器测试
-scripts/test-monitor-compute.mts     速率与进程计算测试
+tests/mock-ssh-server.mjs            返回可波动的模拟指标
+tests/test-monitor-parse.mts         解析器测试
+tests/test-monitor-compute.mts       速率与进程计算测试
 ```
 
 ### 5.2 IPC

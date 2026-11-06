@@ -1,7 +1,7 @@
 /**
  * AIShell mock SSH/SFTP server.
  *
- *   node scripts/mock-ssh-server.mjs
+ *   node tests/mock-ssh-server.mjs
  *
  * Listen on 127.0.0.1:2222, username `demo`, password `test`.
  * Provides an in-memory filesystem, a fake interactive shell and an exec channel.
@@ -826,9 +826,17 @@ const server = new Server({ hostKeys: [hostKey] }, (client) => {
           const stream = accept()
           console.log(`[mock] exec: ${info.command}`)
           const result = runCommand(info.command, { ...ctx })
-          if (result.out) stream.write(result.out)
-          stream.exit(result.code ?? 0)
-          stream.end()
+          const finish = () => {
+            // The client may have hit its exec timeout and closed the channel.
+            if (stream.destroyed) return
+            if (result.out) stream.write(result.out)
+            stream.exit(result.code ?? 0)
+            stream.end()
+          }
+          // `sleep` keeps the exec channel open, which is what the client's
+          // timeout path needs to be exercised against.
+          if (result.sleepMs) setTimeout(finish, result.sleepMs)
+          else finish()
         })
 
         session.on('shell', (accept) => {

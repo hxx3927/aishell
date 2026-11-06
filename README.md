@@ -173,10 +173,10 @@ MCP Server 只监听 `127.0.0.1`，每次启动生成随机 Bearer Token，每�
 
 ```bash
 npm run dev          # 开发模式
-npm run typecheck    # 类型检查（node + web）
+npm run typecheck    # 类型检查（node + web + 测试脚本）
 npm run build        # 构建 out/
 npm run build:win    # 类型检查 + 构建 + NSIS 安装包
-npm test             # AuditStore 单元测试（不需要 Electron）
+npm test             # 单元 + 集成测试（自动启动 mock SSH，不需要 Electron）
 ```
 
 ### MCP 冒烟测试
@@ -200,16 +200,15 @@ PowerShell 中请先 `$env:AISHELL_MCP_URL="..."`、`$env:AISHELL_MCP_TOKEN="...
 <details>
 <summary>针对 mock SSH 服务器和本地 bash 的哨兵协议测试</summary>
 
+`test-agent-shell` / `test-ssh-manager` 会自动在空闲端口启动 mock 服务器，
+也可以先手动启动并通过 `MOCK_SSH_PORT` 复用：
+
 ```bash
-MOCK_SSH_PORT=2299 node scripts/mock-ssh-server.mjs &
+MOCK_SSH_PORT=2299 node tests/mock-ssh-server.mjs &
 
-npx esbuild scripts/test-agent-shell.mts --bundle --platform=node \
-  --format=esm --external:ssh2 --outfile=scripts/.tmp-test.mjs
-MOCK_SSH_PORT=2299 node scripts/.tmp-test.mjs
-
-npx esbuild scripts/test-agent-shell-bash.mts --bundle --platform=node \
-  --format=esm --external:ssh2 --outfile=scripts/.tmp-bash.mjs
-node scripts/.tmp-bash.mjs
+npm run test:agent-shell   # 需要复用已有服务器时加 MOCK_SSH_PORT=2299
+npm run test:ssh           # SshManager：连接、exec、shell、超时、断开
+npm run test:agent-shell-bash
 ```
 
 </details>
@@ -232,7 +231,8 @@ src/
 ├─ preload/       contextBridge 白名单 API
 ├─ renderer/      React 界面（会话栏、终端、文件、Agent、设置）
 └─ shared/        主进程与渲染层共享类型
-scripts/          mock SSH 服务、MCP 冒烟、单元测试、CDP 驱动、截图工具
+tests/            单元 / 集成测试、mock SSH 服务器、手工探针
+scripts/          MCP 冒烟、CDP 驱动、图标与截图工具
 docs/             架构、审计设计、验证清单、截图、设计稿
 build/            应用图标与打包资源
 ```

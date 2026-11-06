@@ -1,6 +1,6 @@
 # AIShell 功能验证清单
 
-验证环境：Electron dev 应用（CDP 驱动，独立 `--user-data-dir` + `--remote-debugging-port`）+ `scripts/mock-ssh-server.mjs`（demo/test @ 127.0.0.1:2222）
+验证环境：Electron dev 应用（CDP 驱动，独立 `--user-data-dir` + `--remote-debugging-port`）+ `tests/mock-ssh-server.mjs`（demo/test @ 127.0.0.1:2222）
 状态标记：⬜ 待验证 · ✅ 通过 · ❌ 存在缺陷 · ⚠️ 环境受限 · ➖ 已移除
 
 ## 1. 启动与持久化

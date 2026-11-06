@@ -3,10 +3,10 @@
  * the mock SSH server, without Electron. The server is started on a free
  * port for the run; set MOCK_SSH_PORT to reuse an already-running one.
  *
- *   npx esbuild scripts/test-agent-shell.mts \
+ *   npx esbuild tests/test-agent-shell.mts \
  *     --bundle --platform=node --format=esm --external:ssh2 \
- *     --outfile=scripts/.tmp-agent-shell.mjs
- *   node scripts/.tmp-agent-shell.mjs
+ *     --outfile=tests/.tmp-agent-shell.mjs
+ *   node tests/.tmp-agent-shell.mjs
  */
 import { spawn } from 'node:child_process'
 import { createServer } from 'node:net'

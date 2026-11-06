@@ -3,10 +3,10 @@
  * sentinel and init script parse correctly in a real POSIX shell, not only in
  * the mock server's fake shell.
  *
- *   npx esbuild scripts/test-agent-shell-bash.mts \
+ *   npx esbuild tests/test-agent-shell-bash.mts \
  *     --bundle --platform=node --format=esm --external:ssh2 \
- *     --outfile=scripts/.tmp-bash.mjs
- *   node scripts/.tmp-bash.mjs
+ *     --outfile=tests/.tmp-bash.mjs
+ *   node tests/.tmp-bash.mjs
  */
 import { spawn } from 'node:child_process'
 import { EventEmitter } from 'node:events'

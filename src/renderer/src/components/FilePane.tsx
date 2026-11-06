@@ -143,8 +143,11 @@ export function FilePane({
   }
 
   return (
+    // @container lets the toolbar and table shed optional controls/columns as
+    // the pane narrows (e.g. after widening the agent panel), instead of
+    // squeezing the name column and letting the header overflow.
     <div
-      className={`flex min-h-0 min-w-0 flex-1 flex-col bg-panel/40 transition ${
+      className={`@container flex min-h-0 min-w-0 flex-1 flex-col bg-panel/40 transition ${
         dragOver ? 'ring-1 ring-inset ring-accent/60' : ''
       }`}
       onDragOver={(event) => {
@@ -155,18 +158,25 @@ export function FilePane({
       onDragLeave={() => setDragOver(false)}
       onDrop={handleDrop}
     >
-      <div className="flex h-8 shrink-0 items-center gap-1 border-b border-line/70 px-2">
+      <div className="flex h-8 shrink-0 items-center gap-1 overflow-hidden border-b border-line/70 px-2">
         <span className="mr-1 shrink-0 text-[10px] font-semibold uppercase tracking-wider text-faint">
           {title}
         </span>
         {subtitle && (
-          <span className="mr-1 hidden shrink-0 text-[10px] text-faint xl:inline">{subtitle}</span>
+          <span className="mr-1 hidden shrink-0 text-[10px] text-faint @min-[600px]:inline">
+            {subtitle}
+          </span>
         )}
-        <button className="icon-btn h-6 w-6" title="后退" disabled={!onBack} onClick={onBack}>
+        <button
+          className="icon-btn hidden h-6 w-6 @min-[320px]:inline-flex"
+          title="后退"
+          disabled={!onBack}
+          onClick={onBack}
+        >
           <ArrowLeft size={12} />
         </button>
         <button
-          className="icon-btn h-6 w-6"
+          className="icon-btn hidden h-6 w-6 @min-[320px]:inline-flex"
           title="前进"
           disabled={!onForward}
           onClick={onForward}
@@ -177,11 +187,15 @@ export function FilePane({
           <ArrowUp size={12} />
         </button>
         {onHome && (
-          <button className="icon-btn h-6 w-6" title="主目录" onClick={onHome}>
+          <button
+            className="icon-btn hidden h-6 w-6 @min-[320px]:inline-flex"
+            title="主目录"
+            onClick={onHome}
+          >
             <FolderOpen size={12} />
           </button>
         )}
-        {leadingToolbar}
+        <div className="hidden @min-[300px]:contents">{leadingToolbar}</div>
         <input
           className="mx-1 min-w-0 flex-1 rounded border border-transparent bg-base/60 px-2 py-0.5 font-mono text-[10px] text-ink outline-none transition focus:border-accent/40"
           value={editingPath}
@@ -198,7 +212,7 @@ export function FilePane({
           }}
           onBlur={() => setEditingPath(path)}
         />
-        <div className="relative shrink-0">
+        <div className="relative hidden shrink-0 @min-[400px]:block">
           <Search size={11} className="absolute left-1.5 top-1/2 -translate-y-1/2 text-faint" />
           <input
             className="w-24 rounded bg-base/60 py-0.5 pl-5 pr-1.5 text-[10px] text-ink outline-none placeholder:text-faint focus:w-32"
@@ -210,7 +224,7 @@ export function FilePane({
         <button className="icon-btn h-6 w-6" title="刷新" onClick={onRefresh}>
           <RefreshCw size={12} className={loading ? 'animate-spin text-accent' : ''} />
         </button>
-        {toolbar}
+        <div className="hidden @min-[260px]:contents">{toolbar}</div>
       </div>
 
       <div
@@ -237,10 +251,16 @@ export function FilePane({
                 <th className="w-6 px-1" />
                 <th className="px-1 py-1 text-left font-medium">名称</th>
                 {showPermissions && (
-                  <th className="w-[76px] px-1 py-1 text-left font-medium">权限</th>
+                  <th className="hidden w-[76px] px-1 py-1 text-left font-medium @min-[440px]:table-cell">
+                    权限
+                  </th>
                 )}
-                <th className="w-[74px] px-1 py-1 text-right font-medium">大小</th>
-                <th className="w-[112px] px-1 py-1 text-right font-medium">修改时间</th>
+                <th className="hidden w-[74px] px-1 py-1 text-right font-medium @min-[220px]:table-cell">
+                  大小
+                </th>
+                <th className="hidden w-[112px] px-1 py-1 text-right font-medium @min-[340px]:table-cell">
+                  修改时间
+                </th>
               </tr>
             </thead>
             <tbody>
@@ -285,14 +305,14 @@ export function FilePane({
                       {entry.name}
                     </td>
                     {showPermissions && (
-                      <td className="px-1 py-[3px] font-mono text-[10px] text-faint">
+                      <td className="hidden px-1 py-[3px] font-mono text-[10px] text-faint @min-[440px]:table-cell">
                         {entry.permissions ?? ''}
                       </td>
                     )}
-                    <td className="px-1 py-[3px] text-right font-mono text-[10px] text-faint">
+                    <td className="hidden px-1 py-[3px] text-right font-mono text-[10px] text-faint @min-[220px]:table-cell">
                       {entry.isDir ? '—' : formatBytes(entry.size)}
                     </td>
-                    <td className="px-1 py-[3px] text-right text-[10px] text-faint">
+                    <td className="hidden px-1 py-[3px] text-right text-[10px] text-faint @min-[340px]:table-cell">
                       {formatTime(entry.mtime)}
                     </td>
                   </tr>

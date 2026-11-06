@@ -676,7 +676,7 @@ export function SftpPanel({ sessionId }: SftpPanelProps) {
           : '单击选中文件，再次单击取消；可多选，或直接拖拽到另一侧'
 
   return (
-    <div className="flex min-h-0 flex-col border-t border-line bg-panel/20">
+    <div className="@container flex min-h-0 flex-col border-t border-line bg-panel/20">
       <ResizeHandle
         axis="y"
         onDelta={(delta) =>
@@ -685,8 +685,8 @@ export function SftpPanel({ sessionId }: SftpPanelProps) {
           )
         }
       />
-      <div className="flex h-8 shrink-0 items-center gap-2 border-b border-line/60 px-3">
-        <span className="shrink-0 text-[10px] font-semibold uppercase tracking-widest text-faint">
+      <div className="flex h-8 min-w-0 shrink-0 items-center gap-2 overflow-hidden border-b border-line/60 px-3">
+        <span className="hidden shrink-0 text-[10px] font-semibold uppercase tracking-widest text-faint @min-[300px]:inline">
           文件管理
         </span>
         <span className="min-w-0 flex-1 truncate text-[10px] text-faint" title={transferHint}>
@@ -705,11 +705,13 @@ export function SftpPanel({ sessionId }: SftpPanelProps) {
           onClick={() => void runBatch('upload', localSelEntries)}
         >
           <Upload size={11} />
-          {batch?.kind === 'upload'
-            ? `上传中 ${batch.done}/${batch.total}`
-            : localSelEntries.length > 1
-              ? `上传 (${localSelEntries.length})`
-              : '上传'}
+          <span className="hidden @min-[480px]:inline">
+            {batch?.kind === 'upload'
+              ? `上传中 ${batch.done}/${batch.total}`
+              : localSelEntries.length > 1
+                ? `上传 (${localSelEntries.length})`
+                : '上传'}
+          </span>
         </button>
         <button
           className="btn-ghost h-6 shrink-0 px-2 text-[10px]"
@@ -724,11 +726,13 @@ export function SftpPanel({ sessionId }: SftpPanelProps) {
           onClick={() => void runBatch('download', remoteSelEntries)}
         >
           <Download size={11} />
-          {batch?.kind === 'download'
-            ? `下载中 ${batch.done}/${batch.total}`
-            : remoteSelEntries.length > 1
-              ? `下载 (${remoteSelEntries.length})`
-              : '下载'}
+          <span className="hidden @min-[480px]:inline">
+            {batch?.kind === 'download'
+              ? `下载中 ${batch.done}/${batch.total}`
+              : remoteSelEntries.length > 1
+                ? `下载 (${remoteSelEntries.length})`
+                : '下载'}
+          </span>
         </button>
         <button
           className="btn-ghost h-6 shrink-0 px-2 text-[10px] text-err/80 hover:text-err"
@@ -745,11 +749,13 @@ export function SftpPanel({ sessionId }: SftpPanelProps) {
           onClick={() => void deleteSelection()}
         >
           <Trash2 size={11} />
-          {batch?.kind === 'delete'
-            ? `删除中 ${batch.done}/${batch.total}`
-            : (localSelEntries.length || remoteSelEntries.length) > 1
-              ? `删除 (${localSelEntries.length || remoteSelEntries.length})`
-              : '删除'}
+          <span className="hidden @min-[480px]:inline">
+            {batch?.kind === 'delete'
+              ? `删除中 ${batch.done}/${batch.total}`
+              : (localSelEntries.length || remoteSelEntries.length) > 1
+                ? `删除 (${localSelEntries.length || remoteSelEntries.length})`
+                : '删除'}
+          </span>
         </button>
         <button
           ref={transferBtnRef}
@@ -762,7 +768,9 @@ export function SftpPanel({ sessionId }: SftpPanelProps) {
           ) : (
             <ArrowUpDown size={11} />
           )}
-          传输{runningCount > 0 ? ` (${runningCount})` : ''}
+          <span className="hidden @min-[480px]:inline">
+            传输{runningCount > 0 ? ` (${runningCount})` : ''}
+          </span>
         </button>
         <button
           className="icon-btn h-6 w-6"

@@ -19,6 +19,9 @@
   --color-ok: #30d158;
   --color-warn: #ffd60a;
   --color-err: #ff453a;
+  /* Two-series charts only; validated against the dark panel surface. */
+  --color-chart-1: #0a84ff;
+  --color-chart-2: #d97706;
 }
 
 :root {
@@ -56,6 +59,9 @@ html[data-theme='light'] {
   --color-ok: #248a3d;
   --color-warn: #b25000;
   --color-err: #d70015;
+  /* Re-stepped for the white panel surface, not an automatic flip. */
+  --color-chart-1: #0071e3;
+  --color-chart-2: #c2410c;
   --logo-from: #0071e3;
   --logo-to: #3fa9f5;
   color-scheme: light;

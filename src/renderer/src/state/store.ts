@@ -5,19 +5,44 @@ import type {
   ConnectionStatus,
   HostInfo,
   KnownHost,
+  MonitorEvent,
+  MonitorHost,
+  MonitorSample,
   Session,
   Settings,
   TransferProgress
 } from '@shared/types'
+import { monitorConnId } from '@shared/monitor'
 
 export interface Tab {
   id: string
-  kind: 'terminal' | 'file' | 'picker'
+  kind: 'terminal' | 'file' | 'picker' | 'monitor'
   /** Absent for the picker tab, which has no server until one is chosen. */
   sessionId?: string
   title: string
   path?: string
   dirty?: boolean
+}
+
+export interface MonitorState {
+  status: 'starting' | 'sampling' | 'paused' | 'error'
+  host?: MonitorHost
+  samples: MonitorSample[]
+  intervalMs: number
+  lastError?: string
+  lastSampleAt?: number
+}
+
+const MONITOR_INTERVAL_KEY = 'aishell.monitorIntervalMs'
+const MONITOR_HISTORY_LIMIT = 450
+
+export function monitorInterval(): number {
+  const saved = Number(localStorage.getItem(MONITOR_INTERVAL_KEY))
+  return Number.isFinite(saved) && saved >= 1000 && saved <= 60_000 ? saved : 2000
+}
+
+function saveMonitorInterval(intervalMs: number): void {
+  localStorage.setItem(MONITOR_INTERVAL_KEY, String(intervalMs))
 }
 
 /** State of one connection instance, keyed by connId. */
@@ -98,6 +123,8 @@ interface AppStore {
   activeAgentId: Record<string, string | null>
   activities: ActivityEvent[]
   transfers: Record<string, TransferProgress>
+  /** Resource-monitor state, keyed by server session id. */
+  monitors: Record<string, MonitorState>
   /** Connection instances whose agent currently holds a persistent shell. */
   agentShells: Record<string, boolean>
   auditOpen: boolean
@@ -118,6 +145,15 @@ interface AppStore {
   setConnection: (connId: string, sessionId: string, patch: Partial<ConnectionState>) => void
   setLatency: (connId: string, latency: number) => void
 
+  /** Focuses the server's monitor tab, creating it on first use. */
+  openMonitorTab: (session: Session) => void
+  startMonitor: (sessionId: string, intervalMs?: number) => Promise<void>
+  stopMonitor: (sessionId: string) => Promise<void>
+  pauseMonitor: (sessionId: string, paused: boolean) => Promise<void>
+  refreshMonitor: (sessionId: string) => Promise<void>
+  setMonitorInterval: (sessionId: string, intervalMs: number) => Promise<void>
+  applyMonitorEvent: (event: MonitorEvent) => void
+
   /** Focuses the session's terminal tab, opening the primary one if needed. */
   openSessionTab: (session: Session) => string
   /** Adds the single reusable "choose a server" tab and focuses it. */
@@ -130,7 +166,7 @@ interface AppStore {
   pickSessionForTab: (tabId: string, session: Session) => string
   openFileTab: (sessionId: string, path: string, title?: string) => void
   closeTab: (tabId: string) => void
-  removeSessionTabs: (sessionId: string) => void
+  removeSessionTabs: (sessionId: string, options?: { keepMonitor?: boolean }) => void
   setActiveTab: (tabId: string) => void
   updateTab: (tabId: string, patch: Partial<Tab>) => void
 
@@ -180,6 +216,7 @@ const emptySettings: Settings = {
 }
 
 async function endSessionConnection(sessionId: string): Promise<void> {
+  await window.aishell.monitor.stop(sessionId).catch(() => undefined)
   const agents = Object.values(useAppStore.getState().agentSessions).filter(
     (agent) => agent.sessionId === sessionId
   )
@@ -203,11 +240,14 @@ async function endSessionConnection(sessionId: string): Promise<void> {
     }
     const activeAgentId = { ...state.activeAgentId }
     delete activeAgentId[sessionId]
+    const monitors = { ...state.monitors }
+    delete monitors[sessionId]
     return {
       connections,
       agentSessions,
       agentShells,
       activeAgentId,
+      monitors,
       agentOrder: state.agentOrder.filter((id) => !removed.has(id))
     }
   })
@@ -232,10 +272,13 @@ function closeTabNow(tabId: string): void {
     const otherTerminals = remainingTabs.filter(
       (t) => t.kind === 'terminal' && t.sessionId === sessionId
     )
+    const hasMonitor = remainingTabs.some(
+      (t) => t.kind === 'monitor' && t.sessionId === sessionId
+    )
     const hasAgents = Object.values(state.agentSessions).some(
       (agent) => agent.sessionId === sessionId
     )
-    if (!otherTerminals.length && !hasAgents) {
+    if (!otherTerminals.length && !hasMonitor && !hasAgents) {
       // Last window of the server: its file tabs lose their connection too.
       void endSessionConnection(sessionId)
       state.removeSessionTabs(sessionId)
@@ -259,6 +302,23 @@ function closeTabNow(tabId: string): void {
       return { tabs, activeTabId, activeSessionId, connections }
     })
     return
+  }
+  if (tab.kind === 'monitor' && tab.sessionId) {
+    const sessionId = tab.sessionId
+    const remainingTabs = state.tabs.filter((t) => t.id !== tabId)
+    const stillUsed =
+      remainingTabs.some(
+        (t) => t.sessionId === sessionId && (t.kind === 'terminal' || t.kind === 'monitor')
+      ) ||
+      Object.values(state.agentSessions).some((agent) => agent.sessionId === sessionId)
+    if (!stillUsed) {
+      // Nothing else is using this server: stopping the monitor also tears
+      // down its connection and the file tabs that were riding on it.
+      void endSessionConnection(sessionId)
+      state.removeSessionTabs(sessionId)
+      return
+    }
+    void state.stopMonitor(sessionId)
   }
   const tabs = state.tabs.filter((t) => t.id !== tabId)
   let activeTabId = state.activeTabId
@@ -296,6 +356,7 @@ export const useAppStore = create<AppStore>()((set, get) => ({
   activeAgentId: {},
   activities: [],
   transfers: {},
+  monitors: {},
   agentShells: {},
   auditOpen: false,
   toasts: [],
@@ -304,6 +365,9 @@ export const useAppStore = create<AppStore>()((set, get) => ({
   sessionEditor: { open: false },
 
   async init() {
+    // A renderer reload drops the old tab list but the main process would keep
+    // polling; nothing is watching those samples any more.
+    await window.aishell.monitor.stopAll().catch(() => undefined)
     const state = await window.aishell.getState()
     const agentSessions = Object.fromEntries(
       state.agents.map((agent) => [agent.agentSessionId, agent])
@@ -402,6 +466,255 @@ export const useAppStore = create<AppStore>()((set, get) => ({
     })
   },
 
+  openMonitorTab(session) {
+    const id = `monitor-${session.id}`
+    const state = get()
+    if (state.tabs.some((t) => t.id === id)) {
+      set({ activeTabId: id, activeSessionId: session.id })
+    } else {
+      set((s) => ({
+        tabs: [
+          ...s.tabs,
+          {
+            id,
+            kind: 'monitor' as const,
+            sessionId: session.id,
+            title: `${session.name} · 监控`
+          }
+        ],
+        activeTabId: id,
+        activeSessionId: session.id
+      }))
+    }
+    // Sampling only starts on its own when the server is already connected.
+    // A disconnected server waits for the explicit "连接并开始监控" action.
+    const current = get()
+    if (current.monitors[session.id]) return
+    if (sessionConnection(current.connections, session.id)?.status === 'connected') {
+      void current.startMonitor(session.id)
+    }
+  },
+
+  async startMonitor(sessionId, intervalMs) {
+    const interval = intervalMs ?? get().monitors[sessionId]?.intervalMs ?? monitorInterval()
+    saveMonitorInterval(interval)
+    set((state) => ({
+      monitors: {
+        ...state.monitors,
+        [sessionId]: {
+          ...(state.monitors[sessionId] ?? {
+            samples: [],
+            intervalMs: interval
+          }),
+          status: 'starting',
+          intervalMs: interval,
+          lastError: undefined
+        }
+      }
+    }))
+    try {
+      const result = await window.aishell.monitor.start(sessionId, interval)
+      // `start` reattaches to a paused entry without resuming it; asking for
+      // the monitor is an explicit resume.
+      await window.aishell.monitor.pause(sessionId, false).catch(() => undefined)
+      set((state) => {
+        const existing = state.monitors[sessionId]
+        // `start` immediately probes once; a failing first probe is reported in
+        // the result so the status does not depend on event ordering.
+        const samples = result.history.length ? result.history : (existing?.samples ?? [])
+        return {
+          monitors: {
+            ...state.monitors,
+            [sessionId]: {
+              ...(existing ?? { samples: [], intervalMs: interval }),
+              status: result.error ? 'error' : samples.length ? 'sampling' : 'starting',
+              host: result.host ?? existing?.host,
+              samples,
+              intervalMs: result.intervalMs,
+              lastError: result.error,
+              lastSampleAt: samples.at(-1)?.ts ?? existing?.lastSampleAt
+            }
+          }
+        }
+      })
+    } catch (err) {
+      set((state) => ({
+        monitors: {
+          ...state.monitors,
+          [sessionId]: {
+            ...(state.monitors[sessionId] ?? { samples: [], intervalMs: interval }),
+            status: 'error',
+            intervalMs: interval,
+            lastError: (err as Error).message
+          }
+        }
+      }))
+    }
+  },
+
+  async stopMonitor(sessionId) {
+    await window.aishell.monitor.stop(sessionId).catch(() => undefined)
+    set((state) => {
+      if (!state.monitors[sessionId]) return {}
+      const monitors = { ...state.monitors }
+      delete monitors[sessionId]
+      return { monitors }
+    })
+  },
+
+  async pauseMonitor(sessionId, paused) {
+    const existing = get().monitors[sessionId]
+    if (!existing) {
+      if (!paused) await get().startMonitor(sessionId)
+      return
+    }
+    if (paused) {
+      set((state) => ({
+        monitors: {
+          ...state.monitors,
+          [sessionId]: { ...existing, status: 'paused' }
+        }
+      }))
+      await window.aishell.monitor.pause(sessionId, true).catch(() => undefined)
+      return
+    }
+    // Pausing also releases the connection on some servers; going back to
+    // sampling after a drop needs a fresh connection first.
+    const connected = get().connections[monitorConnId(sessionId)]?.status === 'connected'
+    if (!connected) {
+      await get().startMonitor(sessionId)
+      return
+    }
+    set((state) => ({
+      monitors: {
+        ...state.monitors,
+        [sessionId]: { ...existing, status: 'sampling' }
+      }
+    }))
+    await window.aishell.monitor.pause(sessionId, false).catch(() => undefined)
+  },
+
+  async refreshMonitor(sessionId) {
+    try {
+      const sample = await window.aishell.monitor.sampleNow(sessionId)
+      // The main process also broadcasts the sample; the event handler dedupes.
+      get().applyMonitorEvent({
+        sessionId,
+        sampling: true,
+        paused: get().monitors[sessionId]?.status === 'paused',
+        sample
+      })
+    } catch (err) {
+      const message = (err as Error).message
+      set((state) => {
+        const existing = state.monitors[sessionId]
+        if (!existing) return {}
+        return {
+          monitors: {
+            ...state.monitors,
+            [sessionId]: { ...existing, status: 'error', lastError: message }
+          }
+        }
+      })
+    }
+  },
+
+  async setMonitorInterval(sessionId, intervalMs) {
+    const interval = Math.min(60_000, Math.max(1000, Math.round(intervalMs)))
+    saveMonitorInterval(interval)
+    const existing = get().monitors[sessionId]
+    if (existing) {
+      set((state) => ({
+        monitors: {
+          ...state.monitors,
+          [sessionId]: { ...existing, intervalMs: interval }
+        }
+      }))
+    }
+    try {
+      const result = await window.aishell.monitor.start(sessionId, interval)
+      set((state) => {
+        const current = state.monitors[sessionId]
+        if (!current) return {}
+        const samples = result.history.length ? result.history : current.samples
+        return {
+          monitors: {
+            ...state.monitors,
+            [sessionId]: {
+              ...current,
+              intervalMs: result.intervalMs,
+              host: result.host ?? current.host,
+              samples,
+              // A paused poller returns its last known failure unchanged.
+              lastError: result.error,
+              status: result.error
+                ? 'error'
+                : current.status === 'starting'
+                  ? samples.length
+                    ? 'sampling'
+                    : 'starting'
+                  : current.status
+            }
+          }
+        }
+      })
+    } catch (err) {
+      const message = (err as Error).message
+      set((state) => {
+        const current = state.monitors[sessionId]
+        if (!current) return {}
+        return {
+          monitors: {
+            ...state.monitors,
+            [sessionId]: { ...current, lastError: message }
+          }
+        }
+      })
+    }
+  },
+
+  applyMonitorEvent(event) {
+    set((state) => {
+      const existing = state.monitors[event.sessionId]
+      if (!event.sampling) {
+        if (!existing) return {}
+        const monitors = { ...state.monitors }
+        delete monitors[event.sessionId]
+        return { monitors }
+      }
+      const base: MonitorState =
+        existing ?? { status: 'starting', samples: [], intervalMs: monitorInterval() }
+      let samples = base.samples
+      const sample = event.sample
+      if (sample && !samples.some((item) => item.ts === sample.ts)) {
+        samples = [...samples, sample]
+        if (samples.length > MONITOR_HISTORY_LIMIT) {
+          samples = samples.slice(samples.length - MONITOR_HISTORY_LIMIT)
+        }
+      }
+      const status: MonitorState['status'] = event.error
+        ? 'error'
+        : event.paused
+          ? 'paused'
+          : samples.length
+            ? 'sampling'
+            : 'starting'
+      return {
+        monitors: {
+          ...state.monitors,
+          [event.sessionId]: {
+            ...base,
+            status,
+            host: event.host ?? base.host,
+            samples,
+            lastError: event.error,
+            lastSampleAt: sample?.ts ?? base.lastSampleAt
+          }
+        }
+      }
+    })
+  },
+
   openSessionTab(session) {
     const state = get()
     const existing = terminalTabsOf(state.tabs, session.id)[0]
@@ -478,16 +791,26 @@ export const useAppStore = create<AppStore>()((set, get) => ({
     const tab = state.tabs.find((t) => t.id === tabId)
     if (!tab) return
 
-    // Closing the last window of a server also closes its file tabs. Agents
-    // are independent windows and keep the server alive on their own.
+    // Closing the last terminal or monitor of a server also closes its file
+    // tabs. Agents and the other kind of window keep the server alive.
+    const sessionId = tab.sessionId
+    const hasOtherConsumer =
+      Boolean(sessionId) &&
+      (state.tabs.some(
+        (t) =>
+          t.id !== tabId &&
+          t.sessionId === sessionId &&
+          (t.kind === 'terminal' || t.kind === 'monitor')
+      ) ||
+        Object.values(state.agentSessions).some((agent) => agent.sessionId === sessionId))
     const lastWindow =
-      tab.kind === 'terminal' &&
-      terminalTabsOf(state.tabs, tab.sessionId!).length === 1 &&
-      !Object.values(state.agentSessions).some((agent) => agent.sessionId === tab.sessionId)
+      (tab.kind === 'terminal' || tab.kind === 'monitor') &&
+      Boolean(sessionId) &&
+      !hasOtherConsumer
     const dirtyTabs =
       lastWindow
         ? state.tabs.filter(
-            (t) => t.sessionId === tab.sessionId && t.kind === 'file' && t.dirty
+            (t) => t.sessionId === sessionId && t.kind === 'file' && t.dirty
           )
         : tab.dirty
           ? [tab]
@@ -498,12 +821,15 @@ export const useAppStore = create<AppStore>()((set, get) => ({
     }
 
     const closingTerminal = tab.kind === 'terminal'
+    const closingMonitor = tab.kind === 'monitor'
     void state
       .confirm({
-        title: closingTerminal ? '关闭终端' : '关闭文件',
+        title: closingTerminal ? '关闭终端' : closingMonitor ? '关闭监控' : '关闭文件',
         message: closingTerminal
           ? `该会话还有 ${dirtyTabs.length} 个文件未保存，关闭最后一个窗口会一并关闭它们。`
-          : '文件有未保存的修改，确定关闭吗？',
+          : closingMonitor
+            ? `关闭监控会停止采样；该会话还有 ${dirtyTabs.length} 个文件未保存，关闭后会一并关闭它们。`
+            : '文件有未保存的修改，确定关闭吗？',
         confirmText: '关闭',
         danger: true
       })
@@ -512,21 +838,42 @@ export const useAppStore = create<AppStore>()((set, get) => ({
       })
   },
 
-  removeSessionTabs(sessionId) {
+  removeSessionTabs(sessionId, options) {
     set((state) => {
-      const index = state.tabs.findIndex((t) => t.sessionId === sessionId)
-      if (index === -1) {
-        // The server may have had only agent windows; drop its panel context.
-        return state.activeSessionId === sessionId ? { activeSessionId: null } : {}
+      // An explicit disconnect keeps the monitor tab so its host card and
+      // history survive, with a "重新连接" action.
+      const keepMonitor = options?.keepMonitor === true
+      const removableIds = new Set(
+        state.tabs
+          .filter(
+            (t) => t.sessionId === sessionId && !(keepMonitor && t.kind === 'monitor')
+          )
+          .map((t) => t.id)
+      )
+      if (!removableIds.size) {
+        if (state.activeSessionId !== sessionId) return {}
+        const monitor = state.tabs.find(
+          (t) => t.sessionId === sessionId && t.kind === 'monitor'
+        )
+        return monitor ? { activeTabId: monitor.id } : { activeSessionId: null }
       }
-      const tabs = state.tabs.filter((t) => t.sessionId !== sessionId)
-      const activeRemoved =
-        state.activeTabId !== null && !tabs.some((t) => t.id === state.activeTabId)
-      const activeTabId = activeRemoved
-        ? (tabs[Math.max(0, index - 1)]?.id ?? tabs[0]?.id ?? null)
-        : state.activeTabId
+      const firstRemoved = state.tabs.findIndex((t) => removableIds.has(t.id))
+      const tabs = state.tabs.filter((t) => !removableIds.has(t.id))
+      let activeTabId = state.activeTabId
+      if (activeTabId === null || removableIds.has(activeTabId)) {
+        // Prefer a tab of the same server (a kept monitor), then the neighbour
+        // before the closed tab.
+        const sameSession = tabs.find((t) => t.sessionId === sessionId)
+        const before = [...state.tabs.slice(0, firstRemoved)]
+          .reverse()
+          .find((t) => !removableIds.has(t.id))
+        activeTabId = sameSession?.id ?? before?.id ?? tabs[0]?.id ?? null
+      }
       const nextActive = tabs.find((t) => t.id === activeTabId)
-      return { tabs, activeTabId, activeSessionId: nextActive?.sessionId ?? null }
+      const activeSessionId =
+        nextActive?.sessionId ??
+        (state.activeSessionId === sessionId ? null : state.activeSessionId)
+      return { tabs, activeTabId, activeSessionId }
     })
   },
 

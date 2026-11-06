@@ -1,4 +1,4 @@
-import { FileCode2, Plus, Server, Terminal as TerminalIcon, X } from 'lucide-react'
+import { Activity, FileCode2, Plus, Server, Terminal as TerminalIcon, X } from 'lucide-react'
 import { useAppStore } from '../state/store'
 
 export function TabBar() {
@@ -23,8 +23,10 @@ export function TabBar() {
         const label =
           tab.kind === 'file'
             ? tab.title
-            : (session?.name ?? tab.title) +
-              (siblings.length > 1 ? ` (${siblings.findIndex((t) => t.id === tab.id) + 1})` : '')
+            : tab.kind === 'monitor'
+              ? `${session?.name ?? tab.title} · 监控`
+              : (session?.name ?? tab.title) +
+                (siblings.length > 1 ? ` (${siblings.findIndex((t) => t.id === tab.id) + 1})` : '')
         return (
           <div
             key={tab.id}
@@ -43,6 +45,8 @@ export function TabBar() {
               <TerminalIcon size={12} className={active ? 'text-accent' : ''} />
             ) : tab.kind === 'file' ? (
               <FileCode2 size={12} className={active ? 'text-accent-2' : ''} />
+            ) : tab.kind === 'monitor' ? (
+              <Activity size={12} className={active ? 'text-accent' : ''} />
             ) : (
               <Server size={12} className={active ? 'text-accent' : ''} />
             )}

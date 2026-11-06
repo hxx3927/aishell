@@ -9,6 +9,7 @@ import { ActivityLog } from './mcp/activity'
 import { ToolRegistry } from './mcp/tools'
 import { McpServer } from './mcp/server'
 import { AuditStore } from './audit/AuditStore'
+import { MonitorService } from './monitor/MonitorService'
 import { registerIpc } from './ipc'
 
 let mainWindow: BrowserWindow | null = null
@@ -17,6 +18,7 @@ let ssh: SshManager | null = null
 let agents: AgentManager | null = null
 let mcp: McpServer | null = null
 let audit: AuditStore | null = null
+let monitor: MonitorService | null = null
 let auditReady: Promise<number> = Promise.resolve(0)
 
 const DEFAULT_AUDIT_RETENTION_DAYS = 90
@@ -150,7 +152,8 @@ async function bootstrap(): Promise<void> {
   }
 
   agents = new AgentManager(store, ssh, pty, mcp, audit, send)
-  registerIpc({ store, ssh, agents, mcp, activity, audit })
+  monitor = new MonitorService(ssh, send)
+  registerIpc({ store, ssh, agents, mcp, activity, audit, monitor })
 
   auditReady = audit.prune().catch((err) => {
     console.warn('[audit] prune failed', err)
@@ -185,6 +188,7 @@ if (!gotLock) {
   })
 
   app.on('before-quit', () => {
+    monitor?.dispose()
     agents?.disposeAll()
     ssh?.disposeAll()
     audit?.dispose()

@@ -67,6 +67,126 @@ export interface ExecResult {
   truncated?: boolean
 }
 
+/** Static host details, collected once when monitoring starts. */
+export interface MonitorHost {
+  hostname: string
+  os?: string
+  kernel?: string
+  cpuModel?: string
+  cores: number
+  totalMemBytes: number
+  interfaces: string[]
+  /** Wall-clock time of the last boot, derived from /proc/uptime. */
+  bootedAt?: number
+}
+
+export interface MonitorDisk {
+  fs: string
+  mount: string
+  sizeBytes: number
+  usedBytes: number
+  availBytes: number
+  usePct: number
+  /** Container overlay/api mount — hidden by default in the filesystem table. */
+  container?: boolean
+}
+
+export interface MonitorNet {
+  iface: string
+  rxBps: number
+  txBps: number
+  rxBytes: number
+  txBytes: number
+  /** Link speed in bits/s from sysfs; absent when the driver does not report it. */
+  speedBps?: number
+}
+
+/** Per-block-device rates, derived from consecutive /proc/diskstats reads. */
+export interface MonitorDiskIo {
+  dev: string
+  readBps: number
+  writeBps: number
+  iops: number
+  /** Share of the sample interval with I/O in flight, 0–100. */
+  activePct: number
+  /** Approximate average latency in ms. */
+  awaitMs: number
+}
+
+/** A GPU reported by nvidia-smi or the amdgpu sysfs interface. */
+export interface MonitorGpu {
+  vendor: 'nvidia' | 'amd'
+  name: string
+  /** Busy share, 0–100; absent when the driver does not expose it. */
+  utilPct?: number
+  memUsedBytes?: number
+  memTotalBytes?: number
+  tempC?: number
+}
+
+/** One process ranked for the process table. */
+export interface MonitorProcess {
+  pid: number
+  name: string
+  /** Instantaneous CPU share over the sample interval, so it can exceed 100. */
+  cpuPct: number
+  /** Resident set size in bytes. */
+  memBytes: number
+}
+
+/** One polling sample. Rates are computed against the previous sample. */
+export interface MonitorSample {
+  sessionId: string
+  ts: number
+  cpuPct: number
+  perCorePct: number[]
+  load: [number, number, number]
+  cores: number
+  processCount: number
+  /** Total threads, from the fourth /proc/loadavg field. */
+  threadCount?: number
+  /** Allocated file handles — the closest Linux analog of Windows "handles". */
+  openFds?: number
+  /** Average current core frequency in MHz. */
+  cpuMhz?: number
+  uptimeSec: number
+  memTotalBytes: number
+  memUsedBytes: number
+  memAvailableBytes: number
+  memCachedBytes: number
+  swapTotalBytes: number
+  swapUsedBytes: number
+  /** Committed memory and its limit (Committed_AS / CommitLimit). */
+  memCommittedBytes?: number
+  memCommitLimitBytes?: number
+  disks: MonitorDisk[]
+  net: MonitorNet[]
+  diskIo: MonitorDiskIo[]
+  /** Present only when a supported GPU is installed. */
+  gpus?: MonitorGpu[]
+  /** Top processes by CPU and by memory, merged; empty when unreadable. */
+  processes?: MonitorProcess[]
+}
+
+export interface MonitorStartResult {
+  host?: MonitorHost
+  history: MonitorSample[]
+  intervalMs: number
+  /** Whether the poller was paused before this start. */
+  paused: boolean
+  /** The last probe failure, if the most recent sample did not succeed. */
+  error?: string
+}
+
+export interface MonitorEvent {
+  sessionId: string
+  sampling: boolean
+  paused: boolean
+  host?: MonitorHost
+  sample?: MonitorSample
+  error?: string
+}
+
 export interface SftpEntry {
   name: string
   path: string

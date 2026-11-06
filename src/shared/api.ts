@@ -8,6 +8,9 @@ import type {
   KnownHost,
   LocalEntry,
   McpInfo,
+  MonitorEvent,
+  MonitorSample,
+  MonitorStartResult,
   Session,
   SessionInput,
   Settings,
@@ -43,6 +46,7 @@ export interface EventMap {
   'activity:event': ActivityEvent
   'sftp:transfer': TransferProgress
   'app:notice': NoticeEvent
+  'monitor:sample': MonitorEvent
 }
 
 export type EventChannel = keyof EventMap
@@ -141,6 +145,16 @@ export interface AishellApi {
     reconnect(agentSessionId: string): Promise<AgentSession>
     input(agentSessionId: string, data: string): Promise<boolean>
     resize(agentSessionId: string, cols: number, rows: number): Promise<boolean>
+  }
+
+  monitor: {
+    /** Starts (or reconnects) the session's dedicated sampling connection. */
+    start(sessionId: string, intervalMs?: number): Promise<MonitorStartResult>
+    stop(sessionId: string): Promise<void>
+    /** Stops every poller, used after a renderer reload. */
+    stopAll(): Promise<void>
+    pause(sessionId: string, paused: boolean): Promise<void>
+    sampleNow(sessionId: string): Promise<MonitorSample>
   }
 
   activity: {

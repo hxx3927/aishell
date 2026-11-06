@@ -1,4 +1,5 @@
 import {
+  Activity,
   ChevronDown,
   ChevronRight,
   Copy,
@@ -48,6 +49,7 @@ export function Sidebar() {
   const prompt = useAppStore((s) => s.prompt)
   const confirm = useAppStore((s) => s.confirm)
   const pushToast = useAppStore((s) => s.pushToast)
+  const openMonitorTab = useAppStore((s) => s.openMonitorTab)
   const [search, setSearch] = useState('')
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({})
   const [menu, setMenu] = useState<{ x: number; y: number; session: Session } | null>(null)
@@ -147,6 +149,11 @@ export function Sidebar() {
               void connectSession(menu.session)
             }
           }
+        },
+        {
+          label: '资源监控',
+          icon: <Activity size={13} />,
+          onClick: () => openMonitorTab(menu.session)
         },
         {
           label: '编辑连接',
@@ -296,9 +303,12 @@ export function Sidebar() {
                           : 'hover:bg-panel-2'
                       }`}
                       onClick={() => {
-                        const tab = tabs.find(
-                          (t) => t.sessionId === session.id && t.kind === 'terminal'
-                        )
+                        // Prefer the terminal; a server whose only window is
+                        // the monitor tab still gets focused from here.
+                        const tab =
+                          tabs.find(
+                            (t) => t.sessionId === session.id && t.kind === 'terminal'
+                          ) ?? tabs.find((t) => t.sessionId === session.id)
                         if (tab) useAppStore.getState().setActiveTab(tab.id)
                       }}
                       onDoubleClick={() => void connectSession(session)}
@@ -314,6 +324,16 @@ export function Sidebar() {
                           {session.username}@{session.host}:{session.port}
                         </div>
                       </div>
+                      <button
+                        className="hidden shrink-0 rounded p-1 text-dim hover:bg-panel-3 hover:text-ink group-hover:block"
+                        title="资源监控"
+                        onClick={(event) => {
+                          event.stopPropagation()
+                          openMonitorTab(session)
+                        }}
+                      >
+                        <Activity size={12} />
+                      </button>
                       <button
                         className="hidden shrink-0 rounded p-1 text-dim hover:bg-panel-3 hover:text-ink group-hover:block"
                         title="编辑"

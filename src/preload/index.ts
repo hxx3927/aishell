@@ -11,7 +11,8 @@ const EVENT_CHANNELS: EventChannel[] = [
   'agent:shell',
   'activity:event',
   'sftp:transfer',
-  'app:notice'
+  'app:notice',
+  'monitor:sample'
 ]
 
 function on<K extends EventChannel>(
@@ -102,6 +103,14 @@ const api: AishellApi = {
     input: (agentSessionId, data) => ipcRenderer.invoke('agent:input', agentSessionId, data),
     resize: (agentSessionId, cols, rows) =>
       ipcRenderer.invoke('agent:resize', agentSessionId, cols, rows)
+  },
+
+  monitor: {
+    start: (sessionId, intervalMs) => ipcRenderer.invoke('monitor:start', sessionId, intervalMs),
+    stop: (sessionId) => ipcRenderer.invoke('monitor:stop', sessionId),
+    stopAll: () => ipcRenderer.invoke('monitor:stopAll'),
+    pause: (sessionId, paused) => ipcRenderer.invoke('monitor:pause', sessionId, paused),
+    sampleNow: (sessionId) => ipcRenderer.invoke('monitor:sampleNow', sessionId)
   },
 
   activity: {

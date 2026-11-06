@@ -248,7 +248,217 @@ function displayPath(path) {
   return path
 }
 
+// ------------------------------------------------------- resource monitor
+
+/** Cumulative counters so the monitor can compute believable byte rates. */
+let netState = { ts: Date.now(), rx: 5_000_000_000, tx: 800_000_000 }
+
+function netCounters() {
+  const now = Date.now()
+  const elapsed = Math.max(0, (now - netState.ts) / 1000)
+  const rxRate = 180_000 + Math.abs(Math.sin(now / 7000)) * 900_000
+  const txRate = 30_000 + Math.abs(Math.cos(now / 5000)) * 160_000
+  netState.rx += rxRate * elapsed
+  netState.tx += txRate * elapsed
+  netState.ts = now
+  return { rx: Math.round(netState.rx), tx: Math.round(netState.tx) }
+}
+
+/**
+ * Cumulative /proc/diskstats counters. sda carries the busy root volume, sdb
+ * the mostly-idle data volume, and the partition/loop entries must be filtered
+ * out by the parser.
+ */
+let diskState = {
+  ts: Date.now(),
+  sda: { reads: 120_000, sectorsRead: 8_000_000, writes: 60_000, sectorsWritten: 3_000_000, ioMs: 420_000 },
+  sdb: { reads: 20_000, sectorsRead: 2_600_000, writes: 8_000, sectorsWritten: 400_000, ioMs: 60_000 }
+}
+
+function diskstatsOutput() {
+  const now = Date.now()
+  const elapsed = Math.max(0, (now - diskState.ts) / 1000)
+  const step = (dev, rate) => {
+    const ops = rate * elapsed
+    dev.reads += ops
+    dev.sectorsRead += ops * 16
+    dev.writes += ops * 0.6
+    dev.sectorsWritten += ops * 0.6 * 32
+    dev.ioMs += Math.min(1, 0.12 + rate / 80) * elapsed * 1000
+  }
+  step(diskState.sda, 14 + Math.abs(Math.sin(now / 4000)) * 32)
+  step(diskState.sdb, 1 + Math.abs(Math.cos(now / 6000)) * 5)
+  diskState.ts = now
+
+  const line = (major, minor, name, counters) =>
+    `${major} ${minor} ${name} ${Math.round(counters.reads)} 0 ${Math.round(counters.sectorsRead)} 1000 ` +
+    `${Math.round(counters.writes)} 0 ${Math.round(counters.sectorsWritten)} 800 0 ${Math.round(counters.ioMs)} 9000 0 0 0\n`
+
+  const partition = { reads: 90_000, sectorsRead: 6_000_000, writes: 40_000, sectorsWritten: 2_000_000, ioMs: 300_000 }
+
+  return (
+    line(8, 0, 'sda', diskState.sda) +
+    line(8, 1, 'sda1', partition) +
+    line(8, 16, 'sdb', diskState.sdb) +
+    line(7, 0, 'loop0', { reads: 10, sectorsRead: 80, writes: 0, sectorsWritten: 0, ioMs: 4 }) +
+    line(253, 0, 'dm-0', partition)
+  )
+}
+
+/**
+ * Simulated processes for the process table. Ticks accumulate with wall time
+ * so the service's delta calculation yields a believable CPU%. Set MOCK_GPU=1
+ * to also expose an NVIDIA GPU.
+ */
+const MOCK_GPU = process.env.MOCK_GPU === '1'
+const procState = {
+  ts: Date.now(),
+  ticks: new Map(),
+  list: [
+    { pid: 812, name: 'node', rate: 0.35, rssPages: 480_000 },
+    { pid: 640, name: 'mysqld', rate: 0.12, rssPages: 310_000 },
+    { pid: 2311, name: 'clamd', rate: 0.04, rssPages: 1_200_000 },
+    { pid: 401, name: 'nginx', rate: 0.06, rssPages: 40_000 },
+    { pid: 1, name: 'systemd', rate: 0.02, rssPages: 18_000 },
+    { pid: 512, name: 'sshd', rate: 0.01, rssPages: 12_000 },
+    { pid: 900, name: 'redis-server', rate: 0.03, rssPages: 90_000 },
+    { pid: 1533, name: 'java', rate: 0.18, rssPages: 2_400_000 },
+    { pid: 77, name: 'kworker/0:1', rate: 0.006, rssPages: 0 },
+    { pid: 3055, name: 'claude', rate: 0.09, rssPages: 260_000 }
+  ]
+}
+
+function procStatOutput() {
+  const now = Date.now()
+  const elapsed = Math.max(0, (now - procState.ts) / 1000)
+  procState.ts = now
+  return procState.list
+    .map((proc) => {
+      // Wobble the rate so the table order changes between samples.
+      const noise = 0.5 + Math.abs(Math.sin(now / 6000 + proc.pid))
+      const ticks = (procState.ticks.get(proc.pid) ?? 1000) + proc.rate * noise * elapsed * 100
+      procState.ticks.set(proc.pid, ticks)
+      return `${proc.pid}|${proc.name}|${Math.round(ticks)}|${proc.rssPages}\n`
+    })
+    .join('')
+}
+
+function gpuOutput() {
+  if (!MOCK_GPU) return ''
+  const util = 25 + Math.abs(Math.sin(Date.now() / 9000)) * 40
+  const util2 = 60 + Math.abs(Math.cos(Date.now() / 7000)) * 30
+  return (
+    `0, NVIDIA T4, ${util.toFixed(0)}, 2048, 15360, 46\n` +
+    `1, NVIDIA A100-SXM4-80GB, ${util2.toFixed(0)}, 40960, 81920, 58\n`
+  )
+}
+
+// user nice system idle iowait irq softirq steal — the parser sums 0–7 and
+// reads idle as index 3 + 4, so only user and idle need to advance.
+function cpuLine(name, userDelta, idleDelta) {
+  return `${name} ${100000 + userDelta} 0 50000 ${1000000 + idleDelta} 0 0 0 0 0\n`
+}
+
+function probeOutput() {
+  const now = Date.now()
+  const usage = Math.max(0.02, Math.min(0.95, 0.22 + 0.2 * Math.sin(now / 9000) + 0.08 * Math.sin(now / 2300)))
+  const idleDelta = Math.round(4000 * (1 - usage))
+  const busyDelta = 4000 - idleDelta
+  const net = netCounters()
+  const load = (0.3 + 0.35 * Math.abs(Math.sin(now / 12000))).toFixed(2)
+  const procs = 320 + Math.round(18 * Math.sin(now / 13000))
+
+  return (
+    '@@load\n' +
+    `${load} ${(Number(load) * 0.8).toFixed(2)} ${(Number(load) * 0.6).toFixed(2)} 2/${procs} 41234\n` +
+    '@@uptime\n' +
+    '987654.12\n' +
+    '@@mem\n' +
+    'MemTotal:       16384000 kB\n' +
+    'MemFree:         2100000 kB\n' +
+    'MemAvailable:    6200000 kB\n' +
+    'Buffers:          120000 kB\n' +
+    'Cached:          3000000 kB\n' +
+    'SReclaimable:     220000 kB\n' +
+    'SwapTotal:       4096000 kB\n' +
+    'SwapFree:        3584000 kB\n' +
+    'Committed_AS:    7400000 kB\n' +
+    'CommitLimit:    12288000 kB\n' +
+    '@@cpu1\n' +
+    cpuLine('cpu', 0, 0) +
+    cpuLine('cpu0', 0, 0) +
+    cpuLine('cpu1', 0, 0) +
+    '@@cpu2\n' +
+    cpuLine('cpu', busyDelta, idleDelta) +
+    cpuLine('cpu0', Math.round(busyDelta / 2), Math.round(idleDelta / 2)) +
+    cpuLine('cpu1', busyDelta - Math.round(busyDelta / 2), idleDelta - Math.round(idleDelta / 2)) +
+    '@@disk\n' +
+    'Filesystem     1024-blocks      Used Available Capacity Mounted on\n' +
+    '/dev/sda1         41943040  12582912  29360128      30% /\n' +
+    '/dev/sdb1        524288000 430000000  94288000      82% /data\n' +
+    'tmpfs              8192000         0   8192000       0% /dev/shm\n' +
+    'overlay          524288000 430000000  94288000      82% /var/lib/docker/overlay2/6f1c2a9b4e/merged\n' +
+    'overlay          524288000 430000000  94288000      82% /var/lib/docker/overlay2/8c73d5e0aa/merged\n' +
+    'overlay          524288000 430000000  94288000      82% /var/lib/docker/overlay2/2d90bf71c3/merged\n' +
+    '@@net\n' +
+    'Inter-|   Receive                                                |  Transmit\n' +
+    ' face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed\n' +
+    '    lo: 1000000 100 0 0 0 0 0 0 1000000 100 0 0 0 0 0 0\n' +
+    `  eth0: ${net.rx} 1000 0 0 0 0 0 0 ${net.tx} 1000 0 0 0 0 0 0\n` +
+    'docker0: 1500000 200 0 0 0 0 0 0 2000000 300 0 0 0 0 0 0\n' +
+    'veth1a2b3c4d: 700000 90 0 0 0 0 0 0 650000 80 0 0 0 0 0 0\n' +
+    '@@procs\n' +
+    `${procs}\n` +
+    '@@freq\n' +
+    'cpu MHz\t\t: 2394.375\n' +
+    'cpu MHz\t\t: 2611.500\n' +
+    '@@fds\n' +
+    '9600\t0\t2097152\n' +
+    '@@diskio\n' +
+    diskstatsOutput() +
+    '@@links\n' +
+    'lo 1000\n' +
+    'eth0 1000\n' +
+    'docker0 10000\n' +
+    'veth1a2b3c4d 10000\n' +
+    '@@procstat\n' +
+    procStatOutput() +
+    '@@nvidia\n' +
+    gpuOutput() +
+    '@@amdgpu\n'
+  )
+}
+
+function hostProbeOutput() {
+  return (
+    '@@hostname\n' +
+    'mock-server\n' +
+    '@@os\n' +
+    'PRETTY_NAME="AIShell Mock Linux 1.0"\n' +
+    '@@kernel\n' +
+    'Linux 6.8.0-mock\n' +
+    '@@cpu\n' +
+    'model name\t: Mock Xeon E5-2680 v4 @ 2.40GHz\n' +
+    '@@memtotal\n' +
+    'MemTotal:       16384000 kB\n' +
+    '@@uptime\n' +
+    '987654.12\n' +
+    '@@caps\n' +
+    'clk:100\n' +
+    'page:4096\n' +
+    (MOCK_GPU ? 'gpu:nvidia\n' : '')
+  )
+}
+
 function runCommand(raw, ctx) {
+  // Monitor probes carry their own section markers; answer them before the
+  // generic host-info shortcut below.
+  if (raw.includes('@@load') && raw.includes('@@cpu2')) {
+    return { out: probeOutput(), code: 0 }
+  }
+  if (raw.includes('@@hostname') && raw.includes('@@memtotal')) {
+    return { out: hostProbeOutput(), code: 0 }
+  }
   if (raw.includes('os-release') && raw.includes('uname -sr')) {
     return {
       out:

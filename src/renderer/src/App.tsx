@@ -1,4 +1,5 @@
 import {
+  Activity,
   FolderTree,
   PanelBottom,
   PanelRight,
@@ -10,11 +11,13 @@ import {
 } from 'lucide-react'
 import { useEffect, type ReactNode } from 'react'
 import type { Session } from '@shared/types'
+import { isMonitorConn } from '@shared/monitor'
 import { useAppStore } from './state/store'
 import { connectSession } from './lib/sessionActions'
 import { Sidebar } from './components/Sidebar'
 import { TabBar } from './components/TabBar'
 import { SessionPicker } from './components/SessionPicker'
+import { MonitorView } from './components/MonitorView'
 import { TerminalView } from './components/TerminalView'
 import { SftpPanel } from './components/SftpPanel'
 import { FileEditor } from './components/FileEditor'
@@ -145,6 +148,17 @@ function TitleBar() {
   const panels = useAppStore((s) => s.panels)
   const togglePanel = useAppStore((s) => s.togglePanel)
   const setSettingsOpen = useAppStore((s) => s.setSettingsOpen)
+  const sessions = useAppStore((s) => s.sessions)
+  const tabs = useAppStore((s) => s.tabs)
+  const activeTabId = useAppStore((s) => s.activeTabId)
+  const backgroundSessionId = useAppStore((s) => s.activeSessionId)
+  const openMonitorTab = useAppStore((s) => s.openMonitorTab)
+
+  const activeSessionId = tabs.find((tab) => tab.id === activeTabId)?.sessionId ?? backgroundSessionId
+  const activeSession = sessions.find((session) => session.id === activeSessionId)
+  const monitorOpen = tabs.some(
+    (tab) => tab.kind === 'monitor' && tab.sessionId === activeSessionId
+  )
 
   const rightPad = platform === 'win32' ? 'pr-[148px]' : 'pr-3'
   const leftPad = platform === 'darwin' ? 'pl-[84px]' : 'pl-3'
@@ -163,6 +177,14 @@ function TitleBar() {
       <div className="flex-1" />
 
       <div className="no-drag flex items-center gap-0.5">
+        <button
+          className={`icon-btn h-7 w-7 ${monitorOpen ? 'text-accent' : ''}`}
+          disabled={!activeSession}
+          onClick={() => activeSession && openMonitorTab(activeSession)}
+          title="资源监控 (Ctrl+Shift+M)"
+        >
+          <Activity size={14} />
+        </button>
         <button
           className={`icon-btn h-7 w-7 ${panels.sidebar ? 'text-accent' : ''}`}
           onClick={() => togglePanel('sidebar')}
@@ -232,15 +254,24 @@ export default function App() {
           error: event.error,
           hostInfo: event.hostInfo
         })
-        if (event.status === 'connected' && !event.connId.startsWith('agent:')) {
+        // The monitor's connection is a background poller; it needs neither a
+        // latency probe nor an error toast — its tab shows the failure.
+        if (
+          event.status === 'connected' &&
+          !event.connId.startsWith('agent:') &&
+          !isMonitorConn(event.connId)
+        ) {
           void window.aishell.ssh
             .ping(event.sessionId)
             .then((ms) => useAppStore.getState().setLatency(event.connId, ms))
             .catch(() => undefined)
         }
-        if (event.status === 'error' && event.error) {
+        if (event.status === 'error' && event.error && !isMonitorConn(event.connId)) {
           store.pushToast('error', event.error)
         }
+      }),
+      window.aishell.on('monitor:sample', (event) => {
+        useAppStore.getState().applyMonitorEvent(event)
       }),
       window.aishell.on('activity:event', (event) => {
         useAppStore.getState().applyActivity(event)
@@ -279,9 +310,9 @@ export default function App() {
       const store = useAppStore.getState()
       for (const [connId, connection] of Object.entries(store.connections)) {
         if (connection.status !== 'connected') continue
-        // Agent windows do not need their own latency probe; the server's
-        // terminal connection already covers it.
-        if (connId.startsWith('agent:')) continue
+        // Agent windows and the monitor poller do not need a latency probe;
+        // the server's terminal connection already covers it.
+        if (connId.startsWith('agent:') || isMonitorConn(connId)) continue
         void window.aishell.ssh
           .ping(connection.sessionId)
           .then((ms) => useAppStore.getState().setLatency(connId, ms))
@@ -316,6 +347,15 @@ export default function App() {
           event.preventDefault()
           store.togglePanel('agent')
           break
+        case 'm': {
+          event.preventDefault()
+          const sessionId =
+            store.tabs.find((tab) => tab.id === store.activeTabId)?.sessionId ??
+            store.activeSessionId
+          const session = store.sessions.find((item) => item.id === sessionId)
+          if (session) store.openMonitorTab(session)
+          break
+        }
         default:
           break
       }
@@ -379,6 +419,16 @@ export default function App() {
                   if (tab.kind === 'file') {
                     return (
                       <FileEditor key={tab.id} tab={tab} visible={tab.id === activeTabId} />
+                    )
+                  }
+                  if (tab.kind === 'monitor' && tab.sessionId) {
+                    return (
+                      <MonitorView
+                        key={tab.id}
+                        sessionId={tab.sessionId}
+                        session={sessions.find((session) => session.id === tab.sessionId)}
+                        visible={tab.id === activeTabId}
+                      />
                     )
                   }
                   return (

@@ -1,4 +1,4 @@
-import { Check, Copy, Cpu, Lock, Radio, Settings, ShieldAlert } from 'lucide-react'
+import { Activity, Check, Copy, Cpu, Lock, Radio, Settings, ShieldAlert } from 'lucide-react'
 import { useState } from 'react'
 import { sessionConnection, useAppStore } from '../state/store'
 
@@ -14,6 +14,8 @@ export function StatusBar() {
   const encryptionAvailable = useAppStore((s) => s.encryptionAvailable)
   const versions = useAppStore((s) => s.versions)
   const setSettingsOpen = useAppStore((s) => s.setSettingsOpen)
+  const monitors = useAppStore((s) => s.monitors)
+  const openMonitorTab = useAppStore((s) => s.openMonitorTab)
 
   const [mcpOpen, setMcpOpen] = useState(false)
   const [copied, setCopied] = useState(false)
@@ -44,6 +46,13 @@ export function StatusBar() {
     sessionAgents.find((item) => item.agentSessionId === activeAgentId[session?.id ?? '']) ??
     sessionAgents[0]
   const runningAgents = sessionAgents.filter((item) => item.status === 'running').length
+
+  const monitor = session ? monitors[session.id] : undefined
+  const monitorSample = monitor?.samples.at(-1)
+  const memPct =
+    monitorSample && monitorSample.memTotalBytes
+      ? (monitorSample.memUsedBytes / monitorSample.memTotalBytes) * 100
+      : undefined
 
   const status = connection?.status ?? 'disconnected'
   const statusLabel =
@@ -90,6 +99,20 @@ export function StatusBar() {
       )}
 
       <div className="flex-1" />
+
+      {session && monitorSample && (
+        <button
+          type="button"
+          className="flex items-center gap-1 rounded px-1 py-0.5 tabular-nums transition hover:bg-panel-2 hover:text-ink"
+          title="回到资源监控"
+          onClick={() => openMonitorTab(session)}
+        >
+          <Activity size={10} />
+          CPU {Math.round(monitorSample.cpuPct)}%
+          {memPct !== undefined && ` · MEM ${Math.round(memPct)}%`}
+          {monitor?.status === 'paused' && ' · 已暂停'}
+        </button>
+      )}
 
       {agent && (
         <span

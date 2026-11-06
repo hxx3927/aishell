@@ -14,8 +14,9 @@
     "typecheck": "npm run typecheck:node && npm run typecheck:web",
     "build:win": "npm run typecheck && electron-vite build && electron-builder --win",
     "mock:ssh": "node scripts/mock-ssh-server.mjs",
-    "test": "npm run test:audit",
-    "test:audit": "esbuild scripts/test-audit-store.mts --bundle --platform=node --format=cjs --external:electron --outfile=scripts/.tmp-audit-store.cjs && node scripts/.tmp-audit-store.cjs"
+    "test": "npm run test:audit && npm run test:monitor",
+    "test:audit": "esbuild scripts/test-audit-store.mts --bundle --platform=node --format=cjs --external:electron --outfile=scripts/.tmp-audit-store.cjs && node scripts/.tmp-audit-store.cjs",
+    "test:monitor": "esbuild scripts/test-monitor-parse.mts --bundle --platform=node --format=cjs --outfile=scripts/.tmp-monitor-parse.cjs && node scripts/.tmp-monitor-parse.cjs"
   },
   "dependencies": {
     "@codemirror/lang-css": "^6.3.1",

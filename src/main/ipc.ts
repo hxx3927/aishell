@@ -10,6 +10,7 @@ import type { AgentManager } from './agents/AgentManager'
 import type { McpServer } from './mcp/server'
 import type { ActivityLog } from './mcp/activity'
 import type { AuditStore } from './audit/AuditStore'
+import type { MonitorService } from './monitor/MonitorService'
 import { dateKey } from './audit/AuditStore'
 
 interface Deps {
@@ -19,10 +20,11 @@ interface Deps {
   mcp: McpServer
   activity: ActivityLog
   audit: AuditStore
+  monitor: MonitorService
 }
 
 export function registerIpc(deps: Deps): void {
-  const { store, ssh, agents, mcp, activity, audit } = deps
+  const { store, ssh, agents, mcp, activity, audit, monitor } = deps
 
   ipcMain.handle('app:getState', () => ({
     sessions: store.listSessions(),
@@ -46,6 +48,7 @@ export function registerIpc(deps: Deps): void {
   ipcMain.handle('group:rename', (_e, from: string, to: string) => store.renameGroup(from, to))
   ipcMain.handle('group:remove', (_e, name: string) => store.deleteGroup(name))
   ipcMain.handle('session:delete', async (_e, sessionId: string) => {
+    monitor.stop(sessionId)
     agents.stopForSession(sessionId)
     ssh.disconnect(sessionId)
     await store.deleteSession(sessionId)
@@ -184,6 +187,23 @@ export function registerIpc(deps: Deps): void {
     agents.resize(agentSessionId, cols, rows)
     return true
   })
+
+  ipcMain.handle('monitor:start', (_e, sessionId: string, intervalMs?: number) =>
+    monitor.start(sessionId, intervalMs)
+  )
+  ipcMain.handle('monitor:stop', (_e, sessionId: string) => {
+    monitor.stop(sessionId)
+    return true
+  })
+  ipcMain.handle('monitor:stopAll', () => {
+    monitor.stopAll()
+    return true
+  })
+  ipcMain.handle('monitor:pause', (_e, sessionId: string, paused: boolean) => {
+    monitor.pause(sessionId, paused)
+    return true
+  })
+  ipcMain.handle('monitor:sampleNow', (_e, sessionId: string) => monitor.sampleNow(sessionId))
 
   ipcMain.handle('activity:list', (_e, sessionId?: string) => activity.list(sessionId))
 

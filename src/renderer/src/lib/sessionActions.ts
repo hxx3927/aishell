@@ -45,11 +45,14 @@ export async function disconnectSession(session: Session): Promise<void> {
       window.aishell.agent.stop(agent.agentSessionId).catch(() => undefined)
     )
   )
+  // Keep the monitor tab and its history; pausing first stops the poller from
+  // failing against the connection that is about to go away.
+  await window.aishell.monitor.pause(session.id, true).catch(() => undefined)
   await window.aishell.ssh.disconnect(session.id)
-  // Disconnecting tears down the session, so its tabs no longer have a
-  // backing connection — close them along with it.
+  // Disconnecting tears down the terminals, so close them; the monitor tab
+  // stays with a reconnect action.
   const current = useAppStore.getState()
-  current.removeSessionTabs(session.id)
+  current.removeSessionTabs(session.id, { keepMonitor: true })
   const removed = new Set(agents.map((agent) => agent.agentSessionId))
   useAppStore.setState((state) => {
     const agentSessions = { ...state.agentSessions }

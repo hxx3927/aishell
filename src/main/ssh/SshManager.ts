@@ -301,6 +301,12 @@ export class SshManager {
 
       try {
         client.connect(config)
+        // ssh2 leaves Nagle on (Node's socket default), which holds each
+        // keystroke until the previous small packet is ACKed — up to one RTT
+        // of lag on a high-latency link. OpenSSH and PuTTY both disable it
+        // for interactive sessions; the socket exists by now, so this takes
+        // effect for the whole connection.
+        client.setNoDelay(true)
       } catch (err) {
         fail(err as Error)
       }

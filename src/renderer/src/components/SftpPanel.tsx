@@ -1,6 +1,7 @@
 import {
   ArrowUpDown,
   ArrowUpFromLine,
+  Ban,
   Download,
   FilePlus,
   Folder,
@@ -45,6 +46,20 @@ interface MenuState {
   y: number
   pane: 'local' | 'remote'
   entry: PaneEntry | null
+}
+
+interface BatchState {
+  id: number
+  kind: 'upload' | 'download' | 'delete'
+  done: number
+  total: number
+}
+
+function sumProgress(batches: BatchState[]): { done: number; total: number } {
+  return batches.reduce(
+    (acc, batch) => ({ done: acc.done + batch.done, total: acc.total + batch.total }),
+    { done: 0, total: 0 }
+  )
 }
 
 const TRANSFER_POPOVER_WIDTH = 280
@@ -108,11 +123,11 @@ export function SftpPanel({ sessionId }: SftpPanelProps) {
   const [remoteForward, setRemoteForward] = useState<string[]>([])
 
   const [menu, setMenu] = useState<MenuState | null>(null)
-  const [batch, setBatch] = useState<{
-    kind: 'upload' | 'download' | 'delete'
-    done: number
-    total: number
-  } | null>(null)
+  // Downloads may overlap (downloading the same file twice keeps both copies),
+  // so progress is tracked per operation instead of a single global batch.
+  const [batches, setBatches] = useState<BatchState[]>([])
+  const batchSeq = useRef(0)
+  const activeOps = useRef(0)
   const [showTransfers, setShowTransfers] = useState(false)
   const [transferPos, setTransferPos] = useState(() => readTransferPos() ?? { x: 8, y: 80 })
   const transferBtnRef = useRef<HTMLButtonElement>(null)
@@ -318,42 +333,63 @@ export function SftpPanel({ sessionId }: SftpPanelProps) {
   const refreshLocal = (): void => void loadLocal(localPathRef.current, false)
   const refreshRemote = (): void => void loadRemote(remotePathRef.current, false)
 
-  const batchRef = useRef(false)
-
   const runBatch = async (
     kind: 'upload' | 'download',
     entries: PaneEntry[]
   ): Promise<void> => {
-    if (!entries.length || batchRef.current) return
+    if (!entries.length) return
     const targetDir = kind === 'upload' ? remotePathRef.current : localPathRef.current
     if (!targetDir) return
-    if (kind === 'upload' && !connected) return
-
-    batchRef.current = true
-    setBatch({ kind, done: 0, total: entries.length })
-    let ok = 0
-    const failures: string[] = []
-    for (const entry of entries) {
-      try {
-        if (kind === 'upload') {
-          await window.aishell.sftp.upload(
-            sessionId,
-            entry.path,
-            posixJoin(targetDir, entry.name)
-          )
-        } else {
-          // Pass the containing directory; SshManager appends the basename.
-          // Passing the full path made directory downloads nest twice.
-          await window.aishell.sftp.download(sessionId, entry.path, targetDir)
-        }
-        ok += 1
-      } catch (err) {
-        failures.push(`${entry.name}：${describeFsError(err, entry.path)}`)
+    if (kind === 'upload') {
+      if (!connected) return
+      // Uploads stay single-flight; downloads may overlap so the same remote
+      // file can be fetched twice without waiting for the first to finish.
+      if (activeOps.current > 0) {
+        pushToast('info', '已有传输任务正在进行，请稍后再试')
+        return
       }
-      setBatch((prev) => (prev ? { ...prev, done: prev.done + 1 } : prev))
     }
-    batchRef.current = false
-    setBatch(null)
+
+    const id = ++batchSeq.current
+    activeOps.current += 1
+    setBatches((prev) => [...prev, { id, kind, done: 0, total: entries.length }])
+    let ok = 0
+    let canceled = 0
+    const failures: string[] = []
+    try {
+      for (const entry of entries) {
+        try {
+          if (kind === 'upload') {
+            await window.aishell.sftp.upload(
+              sessionId,
+              entry.path,
+              posixJoin(targetDir, entry.name)
+            )
+            ok += 1
+          } else {
+            // Pass the containing directory; SshManager appends the basename
+            // and picks a unique name when the local file already exists.
+            const result = await window.aishell.sftp.download(
+              sessionId,
+              entry.path,
+              targetDir
+            )
+            if (result.canceled > 0) canceled += result.canceled
+            else ok += 1
+          }
+        } catch (err) {
+          failures.push(`${entry.name}：${describeFsError(err, entry.path)}`)
+        }
+        setBatches((prev) =>
+          prev.map((batch) =>
+            batch.id === id ? { ...batch, done: batch.done + 1 } : batch
+          )
+        )
+      }
+    } finally {
+      activeOps.current -= 1
+      setBatches((prev) => prev.filter((batch) => batch.id !== id))
+    }
 
     // Only refresh the pane the files landed in, and only if the user is
     // still looking at the directory we copied them into.
@@ -365,7 +401,14 @@ export function SftpPanel({ sessionId }: SftpPanelProps) {
     }
 
     const label = kind === 'upload' ? '上传' : '下载'
-    if (failures.length) {
+    if (canceled > 0) {
+      pushToast(
+        'info',
+        `${label}结束：成功 ${ok} 个，取消 ${canceled} 个${
+          failures.length ? `，失败 ${failures.length} 个` : ''
+        }`
+      )
+    } else if (failures.length) {
       pushToast(
         'error',
         `${label}完成：成功 ${ok} 个，失败 ${failures.length} 个。${failures[0]}`
@@ -375,8 +418,16 @@ export function SftpPanel({ sessionId }: SftpPanelProps) {
     }
   }
 
+  const cancelTransfer = async (transfer: TransferProgress): Promise<void> => {
+    try {
+      await window.aishell.sftp.cancelTransfer(transfer.id)
+    } catch (err) {
+      pushToast('error', `取消失败：${(err as Error).message}`)
+    }
+  }
+
   const deleteSelection = async (): Promise<void> => {
-    if (batchRef.current) return
+    if (activeOps.current > 0) return
     const isLocal = localSelEntries.length > 0
     const targets = isLocal ? localSelEntries : remoteSelEntries
     if (!targets.length) return
@@ -392,25 +443,33 @@ export function SftpPanel({ sessionId }: SftpPanelProps) {
     })
     if (!ok) return
 
-    batchRef.current = true
-    setBatch({ kind: 'delete', done: 0, total: targets.length })
+    const id = ++batchSeq.current
+    activeOps.current += 1
+    setBatches((prev) => [...prev, { id, kind: 'delete', done: 0, total: targets.length }])
     let done = 0
     const failures: string[] = []
-    for (const entry of targets) {
-      try {
-        if (isLocal) {
-          await window.aishell.local.remove(entry.path, entry.isDir)
-        } else {
-          await window.aishell.sftp.remove(sessionId, entry.path, entry.isDir)
+    try {
+      for (const entry of targets) {
+        try {
+          if (isLocal) {
+            await window.aishell.local.remove(entry.path, entry.isDir)
+          } else {
+            await window.aishell.sftp.remove(sessionId, entry.path, entry.isDir)
+          }
+          done += 1
+        } catch (err) {
+          failures.push(`${entry.name}：${describeFsError(err, entry.path)}`)
         }
-        done += 1
-      } catch (err) {
-        failures.push(`${entry.name}：${describeFsError(err, entry.path)}`)
+        setBatches((prev) =>
+          prev.map((batch) =>
+            batch.id === id ? { ...batch, done: batch.done + 1 } : batch
+          )
+        )
       }
-      setBatch((prev) => (prev ? { ...prev, done: prev.done + 1 } : prev))
+    } finally {
+      activeOps.current -= 1
+      setBatches((prev) => prev.filter((batch) => batch.id !== id))
     }
-    batchRef.current = false
-    setBatch(null)
 
     if (isLocal) {
       await loadLocal(localPathRef.current, false)
@@ -661,10 +720,22 @@ export function SftpPanel({ sessionId }: SftpPanelProps) {
   const runningCount = runningTransfers.length
   const finishedCount = finishedTransfers.length
 
+  const uploadBatch = batches.find((batch) => batch.kind === 'upload')
+  const downloadBatches = batches.filter((batch) => batch.kind === 'download')
+  const downloadProgress = sumProgress(downloadBatches)
+  const deleteBatch = batches.find((batch) => batch.kind === 'delete')
+  const batchKindLabel = (batch: BatchState): string =>
+    batch.kind === 'upload' ? '上传' : batch.kind === 'download' ? '下载' : '删除'
+  const busyLabel = batches.length
+    ? batches.length === 1
+      ? `${batchKindLabel(batches[0])}中 ${batches[0].done}/${batches[0].total}…`
+      : `下载中 ${downloadProgress.done}/${downloadProgress.total}…`
+    : null
+
   const transferHint = !connected
     ? '未连接'
-    : batch
-      ? `${batch.kind === 'upload' ? '上传' : batch.kind === 'download' ? '下载' : '删除'}中 ${batch.done}/${batch.total}…`
+    : busyLabel
+      ? busyLabel
       : localSelEntries.length
         ? localSelEntries.length === 1
           ? `已选本地「${localSelEntries[0].name}」，可上传`
@@ -694,7 +765,7 @@ export function SftpPanel({ sessionId }: SftpPanelProps) {
         </span>
         <button
           className="btn-ghost h-6 shrink-0 px-2 text-[10px]"
-          disabled={!connected || localSelEntries.length === 0 || Boolean(batch)}
+          disabled={!connected || localSelEntries.length === 0 || batches.length > 0}
           title={
             !connected
               ? '连接服务器后可用'
@@ -706,8 +777,8 @@ export function SftpPanel({ sessionId }: SftpPanelProps) {
         >
           <Upload size={11} />
           <span className="hidden @min-[480px]:inline">
-            {batch?.kind === 'upload'
-              ? `上传中 ${batch.done}/${batch.total}`
+            {uploadBatch
+              ? `上传中 ${uploadBatch.done}/${uploadBatch.total}`
               : localSelEntries.length > 1
                 ? `上传 (${localSelEntries.length})`
                 : '上传'}
@@ -715,7 +786,7 @@ export function SftpPanel({ sessionId }: SftpPanelProps) {
         </button>
         <button
           className="btn-ghost h-6 shrink-0 px-2 text-[10px]"
-          disabled={!connected || remoteSelEntries.length === 0 || Boolean(batch)}
+          disabled={!connected || remoteSelEntries.length === 0}
           title={
             !connected
               ? '连接服务器后可用'
@@ -727,8 +798,8 @@ export function SftpPanel({ sessionId }: SftpPanelProps) {
         >
           <Download size={11} />
           <span className="hidden @min-[480px]:inline">
-            {batch?.kind === 'download'
-              ? `下载中 ${batch.done}/${batch.total}`
+            {downloadBatches.length
+              ? `下载中 ${downloadProgress.done}/${downloadProgress.total}`
               : remoteSelEntries.length > 1
                 ? `下载 (${remoteSelEntries.length})`
                 : '下载'}
@@ -737,7 +808,7 @@ export function SftpPanel({ sessionId }: SftpPanelProps) {
         <button
           className="btn-ghost h-6 shrink-0 px-2 text-[10px] text-err/80 hover:text-err"
           disabled={
-            (!localSelEntries.length && !remoteSelEntries.length) || Boolean(batch)
+            (!localSelEntries.length && !remoteSelEntries.length) || batches.length > 0
           }
           title={
             localSelEntries.length
@@ -750,8 +821,8 @@ export function SftpPanel({ sessionId }: SftpPanelProps) {
         >
           <Trash2 size={11} />
           <span className="hidden @min-[480px]:inline">
-            {batch?.kind === 'delete'
-              ? `删除中 ${batch.done}/${batch.total}`
+            {deleteBatch
+              ? `删除中 ${deleteBatch.done}/${deleteBatch.total}`
               : (localSelEntries.length || remoteSelEntries.length) > 1
                 ? `删除 (${localSelEntries.length || remoteSelEntries.length})`
                 : '删除'}
@@ -965,7 +1036,11 @@ export function SftpPanel({ sessionId }: SftpPanelProps) {
               <div className="px-3 py-5 text-center text-[10px] text-faint">暂无传输记录</div>
             ) : (
               visibleTransfers.map((transfer) => (
-                <TransferRow key={transfer.id} transfer={transfer} />
+                <TransferRow
+                  key={transfer.id}
+                  transfer={transfer}
+                  onCancel={(item) => void cancelTransfer(item)}
+                />
               ))
             )}
           </div>
@@ -1043,42 +1118,93 @@ function LocalRootsMenu({
   )
 }
 
-function TransferRow({ transfer }: { transfer: TransferProgress }) {
+function TransferRow({
+  transfer,
+  onCancel
+}: {
+  transfer: TransferProgress
+  onCancel: (transfer: TransferProgress) => void
+}) {
   const percent =
     transfer.total > 0 ? Math.min(100, (transfer.transferred / transfer.total) * 100) : 0
   const failed = Boolean(transfer.error)
+  const canceled = Boolean(transfer.canceled)
+  const canReveal = transfer.direction === 'download' && Boolean(transfer.localPath)
+  const canCancel = !transfer.done && transfer.direction === 'download'
+
+  const tone = failed
+    ? 'text-err'
+    : canceled
+      ? 'text-warn'
+      : transfer.done
+        ? 'text-ok'
+        : 'text-accent'
+  const barTone = failed
+    ? 'bg-err'
+    : canceled
+      ? 'bg-warn'
+      : transfer.done
+        ? 'bg-ok'
+        : 'bg-accent'
+
+  const tooltip = [
+    transfer.name,
+    transfer.direction === 'download' && transfer.localPath ? transfer.localPath : '',
+    failed ? transfer.error : '',
+    canReveal ? '点击打开所在文件夹' : ''
+  ]
+    .filter(Boolean)
+    .join('\n')
+
   return (
-    <div className="border-b border-line/40 px-2.5 py-1.5 last:border-b-0">
+    <div
+      className={`border-b border-line/40 px-2.5 py-1.5 last:border-b-0 ${
+        canReveal ? 'cursor-pointer transition hover:bg-panel-3/40' : ''
+      }`}
+      title={tooltip}
+      onClick={
+        canReveal
+          ? () => void window.aishell.local.reveal(transfer.localPath as string)
+          : undefined
+      }
+    >
       <div className="flex items-center gap-1.5 text-[10px]">
         {transfer.done ? (
           failed ? (
             <Trash2 size={10} className="shrink-0 text-err" />
+          ) : canceled ? (
+            <Ban size={10} className="shrink-0 text-warn" />
           ) : (
             <Server size={10} className="shrink-0 text-ok" />
           )
         ) : (
           <Loader2 size={10} className="shrink-0 animate-spin text-accent" />
         )}
-        <span
-          className="truncate text-ink"
-          title={failed ? `${transfer.name}\n${transfer.error}` : transfer.name}
-        >
+        <span className="truncate text-ink">
           {transfer.direction === 'upload' ? '↑' : '↓'} {transfer.name}
         </span>
         <span className="ml-auto shrink-0 text-faint">
           {formatBytes(transfer.transferred)} / {formatBytes(transfer.total)}
         </span>
-        <span
-          className={`w-9 shrink-0 text-right ${
-            failed ? 'text-err' : transfer.done ? 'text-ok' : 'text-accent'
-          }`}
-        >
-          {failed ? '失败' : transfer.done ? '完成' : `${Math.round(percent)}%`}
+        <span className={`shrink-0 text-right ${tone} ${canCancel ? '' : 'w-9'}`}>
+          {failed ? '失败' : canceled ? '已取消' : transfer.done ? '完成' : `${Math.round(percent)}%`}
         </span>
+        {canCancel && (
+          <button
+            className="icon-btn h-4 w-4 shrink-0 text-faint hover:text-err"
+            title="取消下载"
+            onClick={(event) => {
+              event.stopPropagation()
+              onCancel(transfer)
+            }}
+          >
+            <X size={10} />
+          </button>
+        )}
       </div>
       <div className="mt-1 h-0.5 w-full overflow-hidden rounded-full bg-panel-3">
         <div
-          className={`h-full transition-all ${failed ? 'bg-err' : transfer.done ? 'bg-ok' : 'bg-accent'}`}
+          className={`h-full transition-all ${barTone}`}
           style={{ width: `${failed ? 100 : percent}%` }}
         />
       </div>

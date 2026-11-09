@@ -16,6 +16,7 @@ import type {
   Settings,
   SftpEntry,
   TransferProgress,
+  TransferResult,
   AgentDataEvent,
   AgentExitEvent,
   AgentStateEvent,
@@ -96,7 +97,9 @@ export interface AishellApi {
     remove(sessionId: string, path: string, recursive: boolean): Promise<void>
     chmod(sessionId: string, path: string, mode: number): Promise<void>
     upload(sessionId: string, localPath: string, remotePath: string): Promise<void>
-    download(sessionId: string, remotePath: string, localPath: string): Promise<void>
+    download(sessionId: string, remotePath: string, localPath: string): Promise<TransferResult>
+    /** Stops a running download; returns false when it already finished. */
+    cancelTransfer(transferId: string): Promise<boolean>
   }
 
   local: {

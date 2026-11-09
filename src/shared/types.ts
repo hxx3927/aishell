@@ -222,6 +222,15 @@ export interface TransferProgress {
   total: number
   done: boolean
   error?: string
+  /** Absolute local target for downloads, used to reveal the file in Explorer. */
+  localPath?: string
+  /** The user stopped this transfer; it is finished but not successful. */
+  canceled?: boolean
+}
+
+/** Outcome of a download request; `canceled` counts files the user skipped. */
+export interface TransferResult {
+  canceled: number
 }
 
 /**

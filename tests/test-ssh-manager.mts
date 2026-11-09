@@ -9,7 +9,10 @@
  *   node tests/.tmp-ssh-manager.mjs
  */
 import { spawn } from 'node:child_process'
+import { mkdtemp, readdir, rm, stat } from 'node:fs/promises'
 import { createServer } from 'node:net'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import ssh2 from 'ssh2'
 import { SshManager } from '../src/main/ssh/SshManager.ts'
@@ -226,6 +229,47 @@ try {
   unknownWriteThrew = true
 }
 check('shell: write to an unknown connection is a no-op', !unknownWriteThrew)
+
+// --- download --------------------------------------------------------------
+const downloadDir = await mkdtemp(join(tmpdir(), 'aishell-sftp-'))
+const firstDownload = await manager.download('s1', '/home/demo/readme.txt', downloadDir)
+const secondDownload = await manager.download('s1', '/home/demo/readme.txt', downloadDir)
+const downloaded = (await readdir(downloadDir)).sort()
+check(
+  'download: the same remote file twice keeps both copies',
+  firstDownload.canceled === 0 &&
+    secondDownload.canceled === 0 &&
+    downloaded.join(',') === 'readme (1).txt,readme.txt',
+  { firstDownload, secondDownload, downloaded }
+)
+const finishedDownloads = events.filter(
+  (event) =>
+    event.channel === 'sftp:transfer' &&
+    event.payload.direction === 'download' &&
+    event.payload.done
+)
+check(
+  'download: finished transfers carry the local path',
+  finishedDownloads.length === 2 &&
+    finishedDownloads.every((event) => typeof event.payload.localPath === 'string'),
+  finishedDownloads
+)
+check('download: unknown transfer ids cannot be cancelled', manager.cancelTransfer('nope') === false)
+
+// MCP and the editor pass a full file path; keep that meaning instead of
+// creating a directory with the file's name.
+const explicitDir = await mkdtemp(join(tmpdir(), 'aishell-sftp-explicit-'))
+const explicitTarget = join(explicitDir, 'renamed.txt')
+await manager.download('s1', '/home/demo/readme.txt', explicitTarget)
+const explicitStats = await stat(explicitTarget).catch(() => null)
+check(
+  'download: an explicit file path is written as-is',
+  explicitStats?.isFile() === true &&
+    (await readdir(explicitDir)).join(',') === 'renamed.txt',
+  explicitStats
+)
+await rm(explicitDir, { recursive: true, force: true })
+await rm(downloadDir, { recursive: true, force: true })
 
 // --- disconnect ------------------------------------------------------------
 manager.disconnect('s1')

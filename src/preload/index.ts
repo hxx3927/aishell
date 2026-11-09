@@ -75,7 +75,8 @@ const api: AishellApi = {
     upload: (sessionId, localPath, remotePath) =>
       ipcRenderer.invoke('sftp:upload', sessionId, localPath, remotePath),
     download: (sessionId, remotePath, localPath) =>
-      ipcRenderer.invoke('sftp:download', sessionId, remotePath, localPath)
+      ipcRenderer.invoke('sftp:download', sessionId, remotePath, localPath),
+    cancelTransfer: (transferId) => ipcRenderer.invoke('sftp:cancelTransfer', transferId)
   },
 
   local: {

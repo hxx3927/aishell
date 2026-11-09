@@ -6,9 +6,11 @@ import {
   type SFTPWrapper
 } from 'ssh2'
 import { createHash, randomUUID } from 'node:crypto'
-import { readFileSync, promises as fsp } from 'node:fs'
-import { basename, join } from 'node:path'
+import { createWriteStream, readFileSync, promises as fsp } from 'node:fs'
+import { basename, extname, join } from 'node:path'
 import { StringDecoder } from 'node:string_decoder'
+import { Transform } from 'node:stream'
+import { pipeline } from 'node:stream/promises'
 import type {
   ConnectionStatus,
   ExecResult,
@@ -16,7 +18,8 @@ import type {
   HostInfo,
   Session,
   SftpEntry,
-  TransferProgress
+  TransferProgress,
+  TransferResult
 } from '@shared/types'
 import type { SessionStore } from '../store/SessionStore'
 import { AgentShell } from './AgentShell'
@@ -54,8 +57,23 @@ interface Runtime {
 
 type Send = (channel: string, payload: unknown) => void
 
+/** Internal marker: the user cancelled this file; the caller skips and moves on. */
+class TransferCanceledError extends Error {
+  constructor() {
+    super('传输已取消')
+    this.name = 'TransferCanceledError'
+  }
+}
+
 export class SshManager {
   private runtimes = new Map<string, Runtime>()
+  /** Running downloads keyed by transfer id, so the UI can stop one. */
+  private transfers = new Map<string, AbortController>()
+  /**
+   * Local targets claimed by in-flight downloads. Concurrent downloads of the
+   * same remote file must not both pick the same free name.
+   */
+  private reservedLocalPaths = new Set<string>()
 
   /** Called whenever an agent shell opens or closes (including idle and disconnect). */
   onAgentShellChange: (
@@ -934,79 +952,196 @@ export class SshManager {
     })
   }
 
-  async download(sessionId: string, remotePath: string, localPath: string): Promise<void> {
-    const resolved = await this.resolveRemotePath(sessionId, remotePath)
-    const stats = await this.statPath(sessionId, resolved)
-    if (stats.isDir) {
-      const localParent = localPath
-      const target = join(localParent, remoteBasename(resolved))
-      await this.downloadDir(sessionId, resolved, target, remoteBasename(resolved))
-      return
+  /**
+   * `localPath` is the destination directory. The target name is made unique
+   * against files already on disk and against other in-flight downloads, so
+   * downloading the same file twice keeps both copies like a browser does.
+   */
+  private async allocateLocalTarget(
+    dir: string,
+    name: string,
+    isDirectory: boolean
+  ): Promise<string> {
+    await fsp.mkdir(dir, { recursive: true })
+    const ext = isDirectory ? '' : extname(name)
+    const stem = ext ? name.slice(0, -ext.length) : name
+    for (let index = 0; ; index += 1) {
+      const candidate = join(dir, index === 0 ? name : `${stem} (${index})${ext}`)
+      if (this.reservedLocalPaths.has(candidate)) continue
+      const exists = await fsp
+        .stat(candidate)
+        .then(() => true)
+        .catch(() => false)
+      // Re-check after the await: a concurrent download may have claimed it.
+      if (!exists && !this.reservedLocalPaths.has(candidate)) {
+        this.reservedLocalPaths.add(candidate)
+        return candidate
+      }
     }
-
-    let target = localPath
-    try {
-      const localStats = await fsp.stat(localPath)
-      if (localStats.isDirectory()) target = join(localPath, remoteBasename(resolved))
-    } catch {
-      /* path does not exist yet */
-    }
-    await this.getFile(sessionId, resolved, target, remoteBasename(resolved))
   }
 
+  /**
+   * A directory destination gets a unique name inside it, so downloading the
+   * same file twice keeps both copies. An explicit path (MCP tool, editor
+   * download) keeps the old semantics: write exactly there.
+   */
+  private async resolveLocalTarget(
+    localPath: string,
+    remoteName: string,
+    isDirectory: boolean
+  ): Promise<string> {
+    const existing = await fsp
+      .stat(localPath)
+      .then((stats) => stats)
+      .catch(() => null)
+    if (existing?.isDirectory()) {
+      return this.allocateLocalTarget(localPath, remoteName, isDirectory)
+    }
+    if (existing && isDirectory) {
+      throw new Error(`本地目标已是同名文件，无法放入目录：${localPath}`)
+    }
+    return localPath
+  }
+
+  async download(
+    sessionId: string,
+    remotePath: string,
+    localPath: string
+  ): Promise<TransferResult> {
+    const resolved = await this.resolveRemotePath(sessionId, remotePath)
+    const stats = await this.statPath(sessionId, resolved)
+    const name = remoteBasename(resolved)
+    const target = await this.resolveLocalTarget(localPath, name, stats.isDir)
+    try {
+      if (stats.isDir) {
+        const canceled = await this.downloadDir(sessionId, resolved, target, name)
+        return { canceled }
+      }
+      try {
+        await this.getFile(sessionId, resolved, target, name, stats.size)
+        return { canceled: 0 }
+      } catch (err) {
+        if (err instanceof TransferCanceledError) return { canceled: 1 }
+        throw err
+      }
+    } finally {
+      this.reservedLocalPaths.delete(target)
+    }
+  }
+
+  /** Returns how many files the user skipped; the folder keeps downloading. */
   private async downloadDir(
     sessionId: string,
     remoteDir: string,
     localDir: string,
     displayRoot: string
-  ): Promise<void> {
+  ): Promise<number> {
     await fsp.mkdir(localDir, { recursive: true })
     const entries = await this.listDir(sessionId, remoteDir)
+    let canceled = 0
     for (const entry of entries) {
       const to = join(localDir, entry.name)
       const display = `${displayRoot}/${entry.name}`
       if (entry.isDir) {
-        await this.downloadDir(sessionId, entry.path, to, display)
-      } else {
-        await this.getFile(sessionId, entry.path, to, display)
+        canceled += await this.downloadDir(sessionId, entry.path, to, display)
+        continue
       }
+      try {
+        await this.getFile(sessionId, entry.path, to, display, entry.size)
+      } catch (err) {
+        // Cancel skips just this file; the rest of the folder still downloads.
+        if (err instanceof TransferCanceledError) canceled += 1
+        else throw err
+      }
+    }
+    return canceled
+  }
+
+  /**
+   * Streams one file so the transfer can be aborted. fastGet has no cancel
+   * hook, and closing the shared SFTP channel would kill unrelated operations.
+   */
+  private async getFile(
+    sessionId: string,
+    remotePath: string,
+    localPath: string,
+    display: string,
+    size: number
+  ): Promise<void> {
+    const rt = this.getRuntime(sessionId)
+    const sftp = await this.getSftp(sessionId)
+    const transferId = randomUUID()
+    const controller = new AbortController()
+    this.transfers.set(transferId, controller)
+    let transferred = 0
+    let lastEmit = 0
+    this.emitTransfer(rt, transferId, 'download', display, 0, size, false, undefined, localPath)
+    const counter = new Transform({
+      transform: (chunk: Buffer, _encoding, callback) => {
+        transferred += chunk.length
+        const now = Date.now()
+        if (now - lastEmit >= 120) {
+          lastEmit = now
+          this.emitTransfer(
+            rt,
+            transferId,
+            'download',
+            display,
+            transferred,
+            size,
+            false,
+            undefined,
+            localPath
+          )
+        }
+        callback(null, chunk)
+      }
+    })
+    try {
+      await pipeline(sftp.createReadStream(remotePath), counter, createWriteStream(localPath), {
+        signal: controller.signal
+      })
+      this.emitTransfer(
+        rt,
+        transferId,
+        'download',
+        display,
+        transferred,
+        size,
+        true,
+        undefined,
+        localPath
+      )
+    } catch (err) {
+      if (controller.signal.aborted) {
+        await fsp.rm(localPath, { force: true }).catch(() => undefined)
+        this.emitTransfer(
+          rt,
+          transferId,
+          'download',
+          display,
+          transferred,
+          size,
+          true,
+          undefined,
+          localPath,
+          true
+        )
+        throw new TransferCanceledError()
+      }
+      const message = err instanceof Error ? err.message : String(err)
+      this.emitTransfer(rt, transferId, 'download', display, 0, 0, true, message, localPath)
+      throw err
+    } finally {
+      this.transfers.delete(transferId)
     }
   }
 
-  private getFile(sessionId: string, remotePath: string, localPath: string, display: string): Promise<void> {
-    const rt = this.getRuntime(sessionId)
-    return new Promise<void>((resolve, reject) => {
-      const transferId = randomUUID()
-      let lastEmit = 0
-      let lastTransferred = 0
-      let lastTotal = 0
-      this.emitTransfer(rt, transferId, 'download', display, 0, 0, false)
-      rt.sftp!.fastGet(
-        remotePath,
-        localPath,
-        {
-          concurrency: 16,
-          step: (transferred: number, _chunk: number, total: number) => {
-            lastTransferred = transferred
-            lastTotal = total
-            const now = Date.now()
-            if (now - lastEmit < 120) return
-            lastEmit = now
-            this.emitTransfer(rt, transferId, 'download', display, transferred, total, false)
-          }
-        },
-        (err) => {
-          if (err) {
-            this.emitTransfer(rt, transferId, 'download', display, 0, 0, true, err.message)
-            reject(err)
-            return
-          }
-          // Keep the real byte counts so the completed row doesn't show "1 B / 1 B".
-          this.emitTransfer(rt, transferId, 'download', display, lastTransferred, lastTotal, true)
-          resolve()
-        }
-      )
-    })
+  cancelTransfer(transferId: string): boolean {
+    const controller = this.transfers.get(transferId)
+    if (!controller) return false
+    controller.abort()
+    return true
   }
 
   private async remoteIsDirectory(sessionId: string, path: string): Promise<boolean> {
@@ -1026,7 +1161,9 @@ export class SshManager {
     transferred: number,
     total: number,
     done: boolean,
-    error?: string
+    error?: string,
+    localPath?: string,
+    canceled?: boolean
   ): void {
     const payload: TransferProgress = {
       id,
@@ -1036,7 +1173,9 @@ export class SshManager {
       transferred,
       total,
       done,
-      error
+      error,
+      localPath,
+      canceled: canceled || undefined
     }
     this.send('sftp:transfer', payload)
   }

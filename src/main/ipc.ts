@@ -1,7 +1,7 @@
 import { app, BrowserWindow, clipboard, dialog, ipcMain, shell } from 'electron'
 import { existsSync, promises as fsp } from 'node:fs'
 import { homedir } from 'node:os'
-import { basename, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import type { AuditQuery, LocalEntry, SessionInput, Settings } from '@shared/types'
 import { applyThemeChrome } from './theme'
 import type { SessionStore } from './store/SessionStore'
@@ -128,6 +128,9 @@ export function registerIpc(deps: Deps): void {
   ipcMain.handle('sftp:download', (_e, sessionId: string, remotePath: string, localPath: string) =>
     ssh.download(sessionId, remotePath, localPath)
   )
+  ipcMain.handle('sftp:cancelTransfer', (_e, transferId: string) =>
+    ssh.cancelTransfer(transferId)
+  )
 
   ipcMain.handle('local:home', () => homedir())
   ipcMain.handle('local:roots', () => localRoots())
@@ -146,8 +149,12 @@ export function registerIpc(deps: Deps): void {
     assertNotRoot(path)
     await fsp.rm(path, { recursive, force: false })
   })
-  ipcMain.handle('local:reveal', (_e, path: string) => {
-    shell.showItemInFolder(path)
+  ipcMain.handle('local:reveal', async (_e, path: string) => {
+    // Cancelled downloads delete their partial file, so fall back to opening
+    // the containing folder when the item itself is gone.
+    const exists = await fsp.access(path).then(() => true).catch(() => false)
+    if (exists) shell.showItemInFolder(path)
+    else await shell.openPath(dirname(path))
   })
   ipcMain.handle('local:copy', async (_e, from: string, to: string) => {
     const stats = await fsp.stat(from)

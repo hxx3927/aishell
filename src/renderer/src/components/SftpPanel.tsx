@@ -18,10 +18,12 @@ import {
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
   type PointerEvent as ReactPointerEvent
 } from 'react'
+import { createPortal } from 'react-dom'
 import type { LocalEntry, SftpEntry, TransferProgress } from '@shared/types'
 import { sessionConnection, useAppStore } from '../state/store'
 import {
@@ -1071,50 +1073,93 @@ function LocalRootsMenu({
   onPick: (path: string) => void
 }) {
   const [open, setOpen] = useState(false)
-  const ref = useRef<HTMLDivElement>(null)
+  const [position, setPosition] = useState({ left: 0, top: 0, maxHeight: 256 })
+  const anchorRef = useRef<HTMLButtonElement>(null)
+  const menuRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     if (!open) return
-    const close = (event: MouseEvent): void => {
-      if (ref.current && !ref.current.contains(event.target as Node)) setOpen(false)
+    const close = (): void => setOpen(false)
+    const onMouseDown = (event: MouseEvent): void => {
+      const target = event.target as Node
+      if (menuRef.current?.contains(target)) return
+      if (anchorRef.current?.contains(target)) return
+      setOpen(false)
     }
-    window.addEventListener('mousedown', close)
-    return () => window.removeEventListener('mousedown', close)
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') setOpen(false)
+    }
+    window.addEventListener('mousedown', onMouseDown)
+    window.addEventListener('keydown', onKey)
+    window.addEventListener('resize', close)
+    window.addEventListener('scroll', close, true)
+    return () => {
+      window.removeEventListener('mousedown', onMouseDown)
+      window.removeEventListener('keydown', onKey)
+      window.removeEventListener('resize', close)
+      window.removeEventListener('scroll', close, true)
+    }
+  }, [open])
+
+  // Measured before paint so the menu never flashes at the top-left corner
+  // for one frame.
+  useLayoutEffect(() => {
+    if (!open) return
+    const anchor = anchorRef.current
+    const menu = menuRef.current
+    if (!anchor || !menu) return
+    const rect = anchor.getBoundingClientRect()
+    const width = menu.offsetWidth
+    const margin = 6
+    const top = Math.min(
+      rect.bottom + margin,
+      Math.max(margin, window.innerHeight - 128)
+    )
+    const maxHeight = Math.min(256, Math.max(120, window.innerHeight - top - 8))
+    const left = clamp(rect.right - width, 8, window.innerWidth - width - 8)
+    setPosition({ left, top, maxHeight })
   }, [open])
 
   if (roots.length === 0) return null
 
   return (
-    <div className="relative" ref={ref}>
+    <>
       <button
+        ref={anchorRef}
         className="icon-btn h-6 w-6"
         title="切换磁盘 / 常用目录"
         onClick={() => setOpen((value) => !value)}
       >
         <HardDrive size={12} />
       </button>
-      {open && (
-        <div className="absolute bottom-full right-0 z-30 mb-1 max-h-64 w-44 overflow-y-auto rounded-lg border border-line-2 bg-panel-2 py-1 shadow-xl">
-          {roots.map((root) => (
-            <button
-              key={root.path}
-              className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-[11px] text-dim transition hover:bg-panel-3 hover:text-ink"
-              onClick={() => {
-                setOpen(false)
-                onPick(root.path)
-              }}
-            >
-              {/^[A-Za-z]:[\\/]$/.test(root.path) ? (
-                <HardDrive size={11} className="shrink-0 text-faint" />
-              ) : (
-                <Folder size={11} className="shrink-0 text-accent/80" />
-              )}
-              <span className="truncate">{root.label}</span>
-            </button>
-          ))}
-        </div>
-      )}
-    </div>
+      {open &&
+        createPortal(
+          <div
+            ref={menuRef}
+            className="fixed z-[80] w-44 overflow-y-auto rounded-lg border border-line-2 bg-panel-2 py-1 shadow-xl shadow-black/40"
+            style={{ left: position.left, top: position.top, maxHeight: position.maxHeight }}
+          >
+            {roots.map((root) => (
+              <button
+                key={root.path}
+                className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-[11px] text-dim transition hover:bg-panel-3 hover:text-ink"
+                onClick={() => {
+                  setOpen(false)
+                  onPick(root.path)
+                }}
+              >
+                {/^[A-Za-z]:[\\/]$/.test(root.path) ? (
+                  <HardDrive size={11} className="shrink-0 text-faint" />
+                ) : (
+                  <Folder size={11} className="shrink-0 text-accent/80" />
+                )}
+                <span className="truncate">{root.label}</span>
+              </button>
+            ))}
+          </div>,
+          document.body
+        )}
+    </>
   )
 }
 

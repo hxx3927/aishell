@@ -13,7 +13,7 @@
     "typecheck:web": "tsc --noEmit -p tsconfig.web.json --composite false",
     "typecheck:tests": "tsc --noEmit -p tsconfig.tests.json --composite false",
     "typecheck": "npm run typecheck:node && npm run typecheck:web && npm run typecheck:tests",
-    "build:win": "npm run typecheck && electron-vite build && electron-builder --win",
+    "build:win": "npm run typecheck && electron-vite build && node scripts/build-win.mjs",
     "mock:ssh": "node tests/mock-ssh-server.mjs",
     "test": "npm run test:audit && npm run test:monitor && npm run test:monitor-compute && npm run test:util && npm run test:store && npm run test:agent-shell && npm run test:agent-shell-bash && npm run test:ssh",
     "test:audit": "esbuild tests/test-audit-store.mts --bundle --platform=node --format=cjs --external:electron --outfile=tests/.tmp-audit-store.cjs && node tests/.tmp-audit-store.cjs",

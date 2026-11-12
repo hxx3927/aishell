@@ -128,7 +128,7 @@ export interface MonitorGpu {
 export interface MonitorProcess {
   pid: number
   name: string
-  /** Instantaneous CPU share over the sample interval, so it can exceed 100. */
+  /** Share of all cores over the sample interval (0–100), like the CPU card. */
   cpuPct: number
   /** Resident set size in bytes. */
   memBytes: number

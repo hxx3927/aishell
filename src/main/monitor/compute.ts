@@ -130,18 +130,22 @@ export function computeProcesses(
   previous: Map<number, ProcBaseline>,
   ts: number,
   clockTicks: number,
-  pageSize: number
+  pageSize: number,
+  cores: number
 ): ProcessSample {
   if (!procs.length) return { items: undefined, next: new Map() }
   const next = new Map<number, ProcBaseline>()
   const rows: MonitorProcess[] = []
+  // Share of the whole machine, like the CPU card: one saturated core on an
+  // 8-core host is 12.5%, so the rows never add up to more than the total.
+  const coreCount = Math.max(1, cores)
   for (const proc of procs) {
     const prev = previous.get(proc.pid)
     next.set(proc.pid, { ticks: proc.ticks, ts })
     const seconds = prev ? (ts - prev.ts) / 1000 : 0
     const ticks = prev && proc.ticks >= prev.ticks ? proc.ticks - prev.ticks : 0
     const cpuPct =
-      seconds > 0 ? (ticks / Math.max(1, clockTicks) / seconds) * 100 : 0
+      seconds > 0 ? (ticks / Math.max(1, clockTicks) / seconds / coreCount) * 100 : 0
     rows.push({
       pid: proc.pid,
       name: proc.name,

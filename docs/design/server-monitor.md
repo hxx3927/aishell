@@ -322,7 +322,7 @@ export interface MonitorGpu {
 export interface MonitorProcess {
   pid: number
   name: string
-  /** 采样间隔内的瞬时占比，可超过 100（多核）。 */
+  /** 采样间隔内占全部核的比例（0–100），与 CPU 卡片口径一致。 */
   cpuPct: number
   /** 常驻内存（RSS），字节。 */
   memBytes: number
@@ -386,7 +386,7 @@ export interface MonitorEvent {
 | 打开句柄 | `/proc/sys/fs/file-nr` | 第一列 |
 | CPU 频率 | `/proc/cpuinfo` | 所有 `cpu MHz` 取平均 |
 | 已提交内存 | `/proc/meminfo` | `Committed_AS`、`CommitLimit` |
-| 进程 CPU% | `/proc/<pid>/stat` utime+stime | `Δticks / CLK_TCK / Δt × 100`；一次 `awk` 扫全部进程 |
+| 进程 CPU% | `/proc/<pid>/stat` utime+stime | `Δticks / CLK_TCK / Δt / 核数 × 100`（占全部核）；一次 `awk` 扫全部进程 |
 | 进程内存 | `/proc/<pid>/stat` 第 24 字段 | RSS 页数 × `PAGESIZE` |
 | 进程 TOP | 上述结果 | 按 CPU 取前 8、按内存取前 8 合并去重，渲染层显示前 5 |
 | GPU（NVIDIA） | `nvidia-smi --query-gpu` | 利用率 %、显存 MiB → 字节、温度 °C；`[N/A]` 视为缺失 |

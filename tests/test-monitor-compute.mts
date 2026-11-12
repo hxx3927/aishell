@@ -152,7 +152,8 @@ const p1 = computeProcesses(
   new Map(),
   10_000,
   100,
-  4096
+  4096,
+  1
 )
 check(
   'proc: first sample has no CPU baseline',
@@ -166,7 +167,8 @@ const p2 = computeProcesses(
   p1.next,
   12_000,
   100,
-  4096
+  4096,
+  1
 )
 check('proc: tick delta becomes CPU% over the interval', near(p2.items?.[0].cpuPct ?? -1, 50), p2.items?.[0])
 
@@ -175,7 +177,8 @@ const pRounded = computeProcesses(
   p1.next,
   10_300,
   100,
-  4096
+  4096,
+  1
 )
 check(
   'proc: CPU% rounds to one decimal',
@@ -188,12 +191,41 @@ const pOver = computeProcesses(
   p1.next,
   11_000,
   100,
-  4096
+  4096,
+  8
 )
 check(
-  'proc: multi-threaded CPU% may exceed 100',
-  near(pOver.items?.[0].cpuPct ?? -1, 800),
+  'proc: saturating all 8 cores reads 100%',
+  near(pOver.items?.[0].cpuPct ?? -1, 100),
   pOver.items?.[0].cpuPct
+)
+
+const pShare = computeProcesses(
+  [{ pid: 1, name: 'containerd', ticks: 1100, rssPages: 100 }],
+  p1.next,
+  12_000,
+  100,
+  4096,
+  8
+)
+check(
+  'proc: CPU% is a share of all cores',
+  near(pShare.items?.[0].cpuPct ?? -1, 6.25, 0.1),
+  pShare.items?.[0].cpuPct
+)
+
+const pNoCores = computeProcesses(
+  [{ pid: 1, name: 'nginx', ticks: 1100, rssPages: 100 }],
+  p1.next,
+  12_000,
+  100,
+  4096,
+  0
+)
+check(
+  'proc: unknown core count falls back to one core',
+  near(pNoCores.items?.[0].cpuPct ?? -1, 50),
+  pNoCores.items?.[0].cpuPct
 )
 
 const pReset = computeProcesses(
@@ -201,7 +233,8 @@ const pReset = computeProcesses(
   p2.next,
   14_000,
   100,
-  4096
+  4096,
+  1
 )
 check('proc: tick reset yields zero', pReset.items?.[0].cpuPct === 0)
 
@@ -220,7 +253,8 @@ const manySample = computeProcesses(
   prevMany,
   11_000,
   100,
-  4096
+  4096,
+  1
 )
 check('proc: top-N is the union of CPU and memory picks', manySample.items?.length === 10, manySample.items?.length)
 check('proc: CPU-heavy process survives', manySample.items?.[0]?.pid === 10, manySample.items?.[0])
@@ -239,7 +273,7 @@ check(
   manySample.next.size === 10 && !manySample.next.has(999)
 )
 
-const empty = computeProcesses([], manySample.next, 12_000, 100, 4096)
+const empty = computeProcesses([], manySample.next, 12_000, 100, 4096, 1)
 check('proc: empty probe yields no rows', empty.items === undefined, empty.items)
 check(
   'proc: empty probe clears stale baselines',
@@ -252,7 +286,8 @@ const afterGap = computeProcesses(
   empty.next,
   13_000,
   100,
-  4096
+  4096,
+  1
 )
 check('proc: first reading after a gap is zero', afterGap.items?.[0].cpuPct === 0)
 

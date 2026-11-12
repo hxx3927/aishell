@@ -308,7 +308,8 @@ export class MonitorService {
       entry.procPrev,
       ts,
       entry.clockTicks,
-      entry.pageSize
+      entry.pageSize,
+      parsed.cpu.cores
     )
     entry.procPrev = procSample.next
     const net = netSample.items

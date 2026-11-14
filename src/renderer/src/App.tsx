@@ -5,14 +5,13 @@ import {
   PanelRight,
   Plus,
   Server,
-  Settings as SettingsIcon,
   Sparkles,
   Terminal as TerminalIcon
 } from 'lucide-react'
 import { useEffect, type ReactNode } from 'react'
 import type { Session } from '@shared/types'
 import { isMonitorConn } from '@shared/monitor'
-import { useAppStore } from './state/store'
+import { resolveTheme, useAppStore } from './state/store'
 import { connectSession } from './lib/sessionActions'
 import { Sidebar } from './components/Sidebar'
 import { TabBar } from './components/TabBar'
@@ -24,7 +23,7 @@ import { FileEditor } from './components/FileEditor'
 import { AgentPanel } from './components/AgentPanel'
 import { StatusBar } from './components/StatusBar'
 import { SessionDialog } from './components/SessionDialog'
-import { SettingsDialog } from './components/SettingsDialog'
+import { SettingsDialog } from './components/settings/SettingsDialog'
 import { AuditDialog } from './components/AuditDialog'
 import { AppDialog } from './components/AppDialog'
 import { LinkMark } from './components/LinkMark'
@@ -147,7 +146,6 @@ function TitleBar() {
   const platform = useAppStore((s) => s.platform)
   const panels = useAppStore((s) => s.panels)
   const togglePanel = useAppStore((s) => s.togglePanel)
-  const setSettingsOpen = useAppStore((s) => s.setSettingsOpen)
   const sessions = useAppStore((s) => s.sessions)
   const tabs = useAppStore((s) => s.tabs)
   const activeTabId = useAppStore((s) => s.activeTabId)
@@ -206,13 +204,6 @@ function TitleBar() {
         >
           <PanelRight size={14} />
         </button>
-        <button
-          className="icon-btn h-7 w-7"
-          onClick={() => setSettingsOpen(true)}
-          title="设置 (Ctrl+,)"
-        >
-          <SettingsIcon size={14} />
-        </button>
       </div>
     </header>
   )
@@ -224,7 +215,7 @@ export default function App() {
   const activeTabId = useAppStore((s) => s.activeTabId)
   const panels = useAppStore((s) => s.panels)
   const sessions = useAppStore((s) => s.sessions)
-  const theme = useAppStore((s) => s.settings.theme)
+  const theme = useAppStore((s) => s.resolvedTheme)
 
   const backgroundSessionId = useAppStore((s) => s.activeSessionId)
   const activeTab = tabs.find((tab) => tab.id === activeTabId)
@@ -234,6 +225,12 @@ export default function App() {
 
   useEffect(() => {
     void useAppStore.getState().init()
+
+    // Paint the most likely theme before the main process's state arrives so
+    // `system` users do not see a dark flash.
+    useAppStore.getState().setInitialTheme(
+      resolveTheme(useAppStore.getState().settings.theme)
+    )
 
     const unsubs = [
       window.aishell.on('ssh:state', (event) => {
@@ -303,6 +300,9 @@ export default function App() {
       }),
       window.aishell.on('app:notice', (notice) => {
         useAppStore.getState().pushToast(notice.level, notice.message)
+      }),
+      window.aishell.on('theme:changed', ({ resolved }) => {
+        useAppStore.getState().setResolvedTheme(resolved)
       })
     ]
 

@@ -91,6 +91,7 @@ const api: AishellApi = {
   },
 
   agent: {
+    probe: (command) => ipcRenderer.invoke('agent:probe', command),
     launch: (sessionId, profileId, name, cols, rows) =>
       ipcRenderer.invoke('agent:launch', sessionId, profileId, name, cols, rows),
     resume: (agentSessionId, cols, rows) =>
@@ -148,7 +149,9 @@ const api: AishellApi = {
   },
 
   shell: {
-    openExternal: (url) => ipcRenderer.invoke('shell:openExternal', url)
+    openExternal: (url) => ipcRenderer.invoke('shell:openExternal', url),
+    openDataDir: () => ipcRenderer.invoke('shell:openDataDir'),
+    copyDiagnostics: () => ipcRenderer.invoke('shell:copyDiagnostics')
   },
 
   clipboard: {

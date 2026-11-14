@@ -4,6 +4,7 @@ import {
   ChevronRight,
   Copy,
   FolderPlus,
+  Monitor,
   Moon,
   Pencil,
   Plug,
@@ -38,7 +39,8 @@ export function Sidebar() {
   const connections = useAppStore((s) => s.connections)
   const tabs = useAppStore((s) => s.tabs)
   const activeTabId = useAppStore((s) => s.activeTabId)
-  const theme = useAppStore((s) => s.settings.theme)
+  const theme = useAppStore((s) => s.resolvedTheme)
+  const themePreference = useAppStore((s) => s.settings.theme)
   const openSessionEditor = useAppStore((s) => s.openSessionEditor)
   const setSettingsOpen = useAppStore((s) => s.setSettingsOpen)
   const saveSettings = useAppStore((s) => s.saveSettings)
@@ -360,8 +362,8 @@ export function Sidebar() {
                 ? 'bg-segment text-ink shadow-sm'
                 : 'text-dim hover:text-ink'
             }`}
-            aria-pressed={theme === 'light'}
-            title="浅色外观"
+            title="浅色外观（深色/浅色任一选择都会关闭「跟随系统」）"
+            aria-pressed={themePreference === 'light'}
             onClick={() => void saveSettings({ theme: 'light' })}
           >
             <Sun size={12} />
@@ -373,14 +375,35 @@ export function Sidebar() {
                 ? 'bg-segment text-ink shadow-sm'
                 : 'text-dim hover:text-ink'
             }`}
-            aria-pressed={theme === 'dark'}
-            title="深色外观"
+            aria-pressed={themePreference === 'dark'}
+            title="深色外观（深色/浅色任一选择都会关闭「跟随系统」）"
             onClick={() => void saveSettings({ theme: 'dark' })}
           >
             <Moon size={12} />
             深色
           </button>
         </div>
+        {/* Toggling off keeps whatever the OS currently resolves to, so the
+            window does not flip just because the user stopped following. */}
+        <button
+          className={`mb-2 flex w-full items-center justify-center gap-1.5 rounded-[7px] py-1 text-[11px] transition ${
+            themePreference === 'system'
+              ? 'bg-accent/10 text-accent'
+              : 'text-dim hover:bg-panel-2 hover:text-ink'
+          }`}
+          aria-pressed={themePreference === 'system'}
+          title={
+            themePreference === 'system'
+              ? '正在跟随系统，再点一次取消并保留当前外观'
+              : '跟随系统的深色 / 浅色设置'
+          }
+          onClick={() =>
+            void saveSettings({ theme: themePreference === 'system' ? theme : 'system' })
+          }
+        >
+          <Monitor size={12} />
+          跟随系统
+        </button>
 
         <button
           className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-xs text-dim transition hover:bg-panel-2 hover:text-ink"

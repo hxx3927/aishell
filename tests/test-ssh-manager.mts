@@ -116,6 +116,12 @@ const session: Session = {
 }
 
 const store = {
+  // The real store always answers; the manager reads connection limits here.
+  getSettings: () => ({
+    sshReadyTimeout: 20000,
+    sshKeepaliveInterval: 15000,
+    sshKeepaliveCountMax: 4
+  }),
   getSession: (id: string) => (id === 's1' ? session : undefined),
   getSecret: (_id: string, kind: string) => (kind === 'password' ? 'test' : undefined),
   verifyHost: () => 'ok' as const,

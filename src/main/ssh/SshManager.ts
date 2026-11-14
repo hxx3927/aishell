@@ -208,13 +208,16 @@ export class SshManager {
       throw new Error(message)
     }
 
+    const sshSettings = this.store.getSettings()
     const config: ConnectConfig = {
       host: session.host,
       port: session.port,
       username: session.username,
-      readyTimeout: 20000,
-      keepaliveInterval: 15000,
-      keepaliveCountMax: 4,
+      readyTimeout: sshSettings.sshReadyTimeout,
+      // ssh2 treats 0 as "send nothing"; leave it undefined so its own
+      // 0ms timer is never scheduled.
+      keepaliveInterval: sshSettings.sshKeepaliveInterval > 0 ? sshSettings.sshKeepaliveInterval : undefined,
+      keepaliveCountMax: sshSettings.sshKeepaliveCountMax,
       tryKeyboard: true,
       hostVerifier: (key: Buffer, verify: (valid: boolean) => void) => {
         const fingerprint = `SHA256:${createHash('sha256')

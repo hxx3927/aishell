@@ -1,5 +1,11 @@
-import { BrowserWindow } from 'electron'
-import type { ThemeMode } from '@shared/types'
+import { BrowserWindow, nativeTheme } from 'electron'
+import type { ThemeMode, ThemePreference } from '@shared/types'
+
+/** Resolves `system` against the OS preference. */
+export function resolveTheme(preference: ThemePreference): ThemeMode {
+  if (preference === 'system') return nativeTheme.shouldUseDarkColors ? 'dark' : 'light'
+  return preference
+}
 
 export function windowChrome(theme: ThemeMode): {
   color: string

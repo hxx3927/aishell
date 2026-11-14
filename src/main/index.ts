@@ -1,6 +1,6 @@
-import { app, BrowserWindow, Menu, shell } from 'electron'
+import { app, BrowserWindow, Menu, nativeTheme, shell } from 'electron'
 import { join } from 'node:path'
-import { windowChrome } from './theme'
+import { applyThemeChrome, resolveTheme, windowChrome } from './theme'
 import { SessionStore } from './store/SessionStore'
 import { SshManager } from './ssh/SshManager'
 import { PtyManager } from './pty/PtyManager'
@@ -30,7 +30,7 @@ function send(channel: string, payload: unknown): void {
 }
 
 function createWindow(): void {
-  const chrome = windowChrome(store?.getSettings().theme ?? 'dark')
+  const chrome = windowChrome(resolveTheme(store?.getSettings().theme ?? 'dark'))
   const win = new BrowserWindow({
     width: 1480,
     height: 920,
@@ -101,6 +101,14 @@ async function bootstrap(): Promise<void> {
   if (process.platform !== 'darwin') Menu.setApplicationMenu(null)
 
   store = new SessionStore()
+  // Keep the window chrome (and renderer UI) in sync when the OS theme flips
+  // while `theme` is set to `system`.
+  nativeTheme.on('updated', () => {
+    if (store?.getSettings().theme !== 'system') return
+    const resolved = resolveTheme('system')
+    applyThemeChrome(resolved)
+    send('theme:changed', { resolved })
+  })
   ssh = new SshManager(store, send)
   const pty = new PtyManager()
   const activity = new ActivityLog(send)

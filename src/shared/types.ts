@@ -36,11 +36,37 @@ export interface AgentProfile {
 }
 
 export type ThemeMode = 'dark' | 'light'
+/** The stored preference; `system` resolves to light or dark at runtime. */
+export type ThemePreference = ThemeMode | 'system'
+export type CursorShape = 'bar' | 'block' | 'underline'
+export type RightClickAction = 'menu' | 'paste'
+export type BellStyle = 'off' | 'visual' | 'sound'
 
 export interface Settings {
   fontSize: number
   fontFamily: string
-  theme: ThemeMode
+  theme: ThemePreference
+  /** Terminal rendering, shared by the SSH and agent terminals. */
+  lineHeight: number
+  cursorStyle: CursorShape
+  cursorBlink: boolean
+  scrollback: number
+  /** Copy the selection to the clipboard as soon as it is made. */
+  copyOnSelect: boolean
+  /** Bare right-click; Shift+right-click always opens the menu. */
+  rightClickAction: RightClickAction
+  /** Ask before pasting text whose line breaks would run extra commands. */
+  pasteLineBreakGuard: boolean
+  /** Strip leading/trailing whitespace from pasted text. */
+  trimPaste: boolean
+  bellStyle: BellStyle
+  /** Send the newline sequence on Shift+Enter so AI coding agents skip the «submit» key. */
+  shiftEnterNewline: boolean
+  /** Milliseconds between SSH keepalive packets; 0 disables them. */
+  sshKeepaliveInterval: number
+  sshKeepaliveCountMax: number
+  /** Milliseconds to wait for the TCP handshake and SSH setup; applies to new connections. */
+  sshReadyTimeout: number
   /** Known connection groups, including groups that currently hold no sessions. */
   groups?: string[]
   agentProfiles: AgentProfile[]
@@ -465,6 +491,14 @@ export interface McpInfo {
 }
 
 export type SaveSessionResult = Session
+
+/** Whether an agent CLI can be found on PATH, plus its reported version. */
+export interface AgentProbeResult {
+  command: string
+  found: boolean
+  path?: string
+  version?: string
+}
 
 export interface OpenTabRequest {
   sessionId: string

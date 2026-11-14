@@ -14,9 +14,10 @@ import {
   TextSelect
 } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { Session, TermExitEvent } from '@shared/types'
-import { terminalTheme } from '../lib/termTheme'
-import { useAppStore } from '../state/store'
+import type { Session, Settings, TermExitEvent, ThemeMode } from '@shared/types'
+import { interceptNativePaste, pasteIntoTerminal } from '../lib/paste'
+import { applyTerminalAppearance, terminalAppearance } from '../lib/terminalOptions'
+import { resolveTheme, useAppStore } from '../state/store'
 import { ContextMenu, type MenuItem } from './ContextMenu'
 
 interface TerminalViewProps {
@@ -28,6 +29,32 @@ interface TerminalViewProps {
 }
 
 type ShellState = 'idle' | 'opening' | 'open' | 'closed'
+
+/** A short two-tone chime, synthesised so the bell sound adds no build asset. */
+function playBell(): void {
+  try {
+    const ctx = new AudioContext()
+    const started = ctx.currentTime
+    for (const [offset, freq] of [
+      [0, 880],
+      [0.09, 660]
+    ] as const) {
+      const osc = ctx.createOscillator()
+      const gain = ctx.createGain()
+      osc.type = 'sine'
+      osc.frequency.value = freq
+      gain.gain.setValueAtTime(0.0001, started + offset)
+      gain.gain.exponentialRampToValueAtTime(0.18, started + offset + 0.01)
+      gain.gain.exponentialRampToValueAtTime(0.0001, started + offset + 0.16)
+      osc.connect(gain).connect(ctx.destination)
+      osc.start(started + offset)
+      osc.stop(started + offset + 0.18)
+    }
+    setTimeout(() => void ctx.close().catch(() => undefined), 500)
+  } catch {
+    // No audio device or audio is blocked: the bell is best-effort.
+  }
+}
 
 function exitLabel(event: TermExitEvent): string {
   if (event.reason === 'disconnected') return '连接已断开'
@@ -56,6 +83,7 @@ export function TerminalView({ connId, sessionId, session, visible }: TerminalVi
   const resizeTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const searchInputRef = useRef<HTMLInputElement>(null)
   const autoRecoveredRef = useRef(false)
+  const dataSeenRef = useRef(false)
   const retryTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const setShellState = useCallback((next: ShellState) => {
@@ -97,6 +125,18 @@ export function TerminalView({ connId, sessionId, session, visible }: TerminalVi
       // Always request a fresh channel: after a renderer reload the main
       // process may still hold a shell whose output nobody saw.
       await window.aishell.term.open(connId, term?.cols ?? 100, term?.rows ?? 30, true)
+      // Data can arrive before this promise settles (and a buffer written
+      // during "connecting" is dropped), so show it first, wait for it, then
+      // clear so the old session's output does not linger behind the banner.
+      dataSeenRef.current = false
+      term?.refresh(0, (term.rows || 30) - 1)
+      let waited = 0
+      while (!dataSeenRef.current && waited < 800) {
+        await new Promise((resolve) => setTimeout(resolve, 30))
+        waited += 30
+      }
+      term?.clear()
+      termRef.current?.focus()
       setShellState('open')
       setTimeout(() => {
         fitNow()
@@ -123,14 +163,8 @@ export function TerminalView({ connId, sessionId, session, visible }: TerminalVi
     if (!container) return
 
     const term = new Terminal({
-      fontFamily: settings.fontFamily,
-      fontSize: settings.fontSize,
-      lineHeight: 1.25,
-      cursorBlink: true,
-      cursorStyle: 'bar',
-      scrollback: 8000,
+      ...terminalAppearance(settings, resolveTheme(settings.theme), false),
       allowProposedApi: true,
-      theme: terminalTheme(settings.theme),
       windowsPty: { backend: 'conpty' }
     })
     const fit = new FitAddon()
@@ -155,31 +189,69 @@ export function TerminalView({ connId, sessionId, session, visible }: TerminalVi
     fitRef.current = fit
     searchRef.current = search
 
-    term.attachCustomKeyEventHandler((event) => {
+    // Keyboard paste (Ctrl+Shift+V and friends) arrives as a native paste
+    // event on the textarea; interceptNativePaste routes it through the
+    // trim/guard preferences instead of letting xterm forward it directly.
+    const keyHandler = (event: KeyboardEvent): boolean => {
       if (event.type !== 'keydown') return true
       const mod = event.ctrlKey || event.metaKey
+      if (event.shiftKey && !mod && event.code === 'Enter') {
+        if (!useAppStore.getState().settings.shiftEnterNewline) return true
+        event.preventDefault()
+        void window.aishell.term.input(connId, '\x1b\r')
+        return false
+      }
       if (mod && event.shiftKey && event.code === 'KeyC') {
         const selection = term.getSelection()
         if (selection) void window.aishell.clipboard.writeText(selection)
         return false
       }
-      // Ctrl+Shift+V is left to the browser: the focused xterm textarea
-      // receives a native paste event and xterm forwards it to the PTY.
-      // Handling it here as well would paste twice.
       if (mod && !event.shiftKey && event.code === 'KeyF') {
         setSearchOpen(true)
         setTimeout(() => searchInputRef.current?.focus(), 30)
         return false
       }
       return true
-    })
+    }
+    term.attachCustomKeyEventHandler((event) => keyHandler(event))
+    const stopPasteIntercept = interceptNativePaste(term)
 
     const inputDisposable = term.onData((data) => {
       void window.aishell.term.input(connId, data)
     })
 
+    let lastCopied = ''
+    const selectionDisposable = term.onSelectionChange(() => {
+      if (!useAppStore.getState().settings.copyOnSelect) return
+      const selection = term.getSelection()
+      if (!selection || selection === lastCopied) return
+      lastCopied = selection
+      void window.aishell.clipboard.writeText(selection)
+    })
+
+    // The bell has no visible effect in xterm; mirror the configured style.
+    const bellDisposable = term.onBell(() => {
+      const style = useAppStore.getState().settings.bellStyle
+      if (style === 'off') return
+      if (style === 'sound') {
+        playBell()
+        return
+      }
+      const el = containerRef.current
+      if (!el) return
+      el.animate(
+        [
+          { boxShadow: 'inset 0 0 0 9999px rgba(255, 214, 10, 0)' },
+          { boxShadow: 'inset 0 0 0 9999px rgba(255, 214, 10, 0.12)' },
+          { boxShadow: 'inset 0 0 0 9999px rgba(255, 214, 10, 0)' }
+        ],
+        { duration: 320 }
+      )
+    })
+
     const unsubData = window.aishell.on('term:data', (event) => {
       if (event.connId !== connId) return
+      if (event.data.trim()) dataSeenRef.current = true
       term.write(event.data)
     })
     const unsubExit = window.aishell.on('term:exit', (event) => {
@@ -219,7 +291,10 @@ export function TerminalView({ connId, sessionId, session, visible }: TerminalVi
 
     return () => {
       observer.disconnect()
+      stopPasteIntercept()
       inputDisposable.dispose()
+      selectionDisposable.dispose()
+      bellDisposable.dispose()
       unsubData()
       unsubExit()
       if (resizeTimer.current) clearTimeout(resizeTimer.current)
@@ -233,21 +308,19 @@ export function TerminalView({ connId, sessionId, session, visible }: TerminalVi
       searchRef.current = null
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [connId, settings.fontFamily, settings.fontSize, fitNow])
+  }, [connId, fitNow])
 
+  // Appearance changes apply to the live terminal; a line-height change also
+  // re-fits so the PTY learns the new grid.
   useEffect(() => {
     const term = termRef.current
     if (!term) return
-    term.options.fontSize = settings.fontSize
-    term.options.fontFamily = settings.fontFamily
-    setTimeout(() => fitNow(), 50)
-  }, [settings.fontSize, settings.fontFamily, fitNow])
-
-  useEffect(() => {
-    const term = termRef.current
-    if (!term) return
-    term.options.theme = terminalTheme(settings.theme)
-  }, [settings.theme])
+    applyTerminalAppearance(
+      term,
+      terminalAppearance(settings, resolveTheme(settings.theme), false),
+      () => setTimeout(fitNow, 20)
+    )
+  }, [settings, fitNow])
 
   useEffect(() => {
     const status = connection?.status
@@ -263,12 +336,14 @@ export function TerminalView({ connId, sessionId, session, visible }: TerminalVi
 
   const reconnect = async (): Promise<void> => {
     try {
-      setShellState('idle')
       setExitInfo(null)
       autoRecoveredRef.current = false
-      termRef.current?.reset()
+      setUiState('idle')
+      // A state event normally leaves 'idle' behind for openShell; this covers
+      // the case where the last event was already 'disconnected'.
       await window.aishell.ssh.connect(connId, sessionId)
     } catch (err) {
+      setUiState('idle')
       pushToast('error', `重连失败：${(err as Error).message}`)
     }
   }
@@ -287,10 +362,8 @@ export function TerminalView({ connId, sessionId, session, visible }: TerminalVi
       label: '粘贴',
       icon: <TextSelect size={13} />,
       onClick: () => {
-        void window.aishell.clipboard.readText().then((text) => {
-          if (text) void window.aishell.term.input(connId, text)
-          termRef.current?.focus()
-        })
+        const term = termRef.current
+        if (term) void pasteIntoTerminal(term, useAppStore.getState().settings)
       }
     },
     {
@@ -391,6 +464,13 @@ export function TerminalView({ connId, sessionId, session, visible }: TerminalVi
           className="absolute inset-0"
           onContextMenu={(event) => {
             event.preventDefault()
+            const current = useAppStore.getState().settings
+            // Shift+right-click always opens the menu, matching Warp and Tabby.
+            if (current.rightClickAction === 'paste' && !event.shiftKey) {
+              const term = termRef.current
+              if (term) void pasteIntoTerminal(term, current)
+              return
+            }
             setMenu({ x: event.clientX, y: event.clientY })
           }}
         />

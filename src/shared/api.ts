@@ -18,6 +18,7 @@ import type {
   TransferProgress,
   TransferResult,
   AgentDataEvent,
+  AgentProbeResult,
   AgentExitEvent,
   AgentStateEvent,
   AgentShellStateEvent,
@@ -27,6 +28,7 @@ import type {
   AuditQueryResult,
   NoticeEvent,
   SshStateEvent,
+  ThemeMode,
   TermDataEvent,
   TermExitEvent
 } from './types'
@@ -34,6 +36,10 @@ import type {
 export interface GroupMutationResult {
   sessions: Session[]
   groups: string[]
+}
+
+export interface ThemeChangedEvent {
+  resolved: ThemeMode
 }
 
 export interface EventMap {
@@ -48,6 +54,8 @@ export interface EventMap {
   'sftp:transfer': TransferProgress
   'app:notice': NoticeEvent
   'monitor:sample': MonitorEvent
+  /** Emitted when `theme: system` and the OS preference flips. */
+  'theme:changed': ThemeChangedEvent
 }
 
 export type EventChannel = keyof EventMap
@@ -114,6 +122,8 @@ export interface AishellApi {
   }
 
   agent: {
+    /** Looks the CLI up on PATH and reads its version (60s cache in main). */
+    probe(command: string): Promise<AgentProbeResult>
     /**
      * Creates an agent window with its own SSH connection and MCP scope. All
      * windows of a server share the local workspace (and Claude Code project).
@@ -199,6 +209,10 @@ export interface AishellApi {
 
   shell: {
     openExternal(url: string): Promise<boolean>
+    /** Opens the AIShell user-data folder in the OS file manager. */
+    openDataDir(): Promise<string | null>
+    /** Copies version and environment details for bug reports. */
+    copyDiagnostics(): Promise<boolean>
   }
 
   clipboard: {

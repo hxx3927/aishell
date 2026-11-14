@@ -10,9 +10,11 @@ import type {
   MonitorSample,
   Session,
   Settings,
+  ThemeMode,
   TransferProgress
 } from '@shared/types'
 import { monitorConnId } from '@shared/monitor'
+import { SETTINGS_DEFAULTS } from '../lib/settingsDefaults'
 
 export interface Tab {
   id: string
@@ -103,6 +105,8 @@ interface AppStore {
   ready: boolean
   sessions: Session[]
   settings: Settings
+  /** `settings.theme` with `system` resolved against the OS preference. */
+  resolvedTheme: ThemeMode
   knownHosts: KnownHost[]
   mcpPort: number | null
   platform: string
@@ -136,7 +140,11 @@ interface AppStore {
   init: () => Promise<void>
   refreshSessions: () => Promise<void>
   setSettings: (settings: Settings) => void
+  /** Initial resolution of `settings.theme` before the main process replies. */
+  setInitialTheme: (resolved: ThemeMode) => void
   saveSettings: (patch: Partial<Settings>) => Promise<void>
+  /** Set when the main process reports an OS theme flip. */
+  setResolvedTheme: (resolved: ThemeMode) => void
   removeKnownHost: (key: string) => Promise<void>
   createGroup: (name: string) => Promise<void>
   renameGroup: (from: string, to: string) => Promise<void>
@@ -204,14 +212,21 @@ interface AppStore {
   closeDialog: () => void
 }
 
+/**
+ * `system` follows the OS from the renderer's point of view; the main
+ * process sends the authoritative value (and OS flips) via `theme:changed`.
+ */
+export function resolveTheme(preference: Settings['theme']): ThemeMode {
+  if (preference !== 'system') return preference
+  return window.matchMedia?.('(prefers-color-scheme: light)').matches ? 'light' : 'dark'
+}
+
 function uid(): string {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
 }
 
 const emptySettings: Settings = {
-  fontSize: 14,
-  fontFamily: "'JetBrains Mono', 'Cascadia Code', Consolas, monospace",
-  theme: 'dark',
+  ...SETTINGS_DEFAULTS,
   agentProfiles: []
 }
 
@@ -339,6 +354,7 @@ export const useAppStore = create<AppStore>()((set, get) => ({
   ready: false,
   sessions: [],
   settings: emptySettings,
+  resolvedTheme: 'dark',
   knownHosts: [],
   mcpPort: null,
   platform: 'win32',
@@ -405,18 +421,34 @@ export const useAppStore = create<AppStore>()((set, get) => ({
     set({
       sessions: state.sessions,
       settings: state.settings,
+      resolvedTheme: resolveTheme(state.settings.theme),
       knownHosts: state.knownHosts,
       mcpPort: state.mcpPort
     })
   },
 
   setSettings(settings) {
-    set({ settings })
+    set({ settings, resolvedTheme: resolveTheme(settings.theme) })
+  },
+
+  setInitialTheme(resolved) {
+    set({ resolvedTheme: resolved })
   },
 
   async saveSettings(patch) {
     const settings = await window.aishell.settings.save(patch)
-    set({ settings })
+    // Resolve against the theme already on screen so a save to an unrelated
+    // field cannot flip the UI.
+    set((state) => ({
+      settings,
+      // A theme control sets a value the user can see (浅色/深色); a save of
+      // any other field must not flip the resolved theme.
+      resolvedTheme: patch.theme ? resolveTheme(patch.theme) : state.resolvedTheme
+    }))
+  },
+
+  setResolvedTheme(resolved) {
+    set({ resolvedTheme: resolved })
   },
 
   async removeKnownHost(key) {

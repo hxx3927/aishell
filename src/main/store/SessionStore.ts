@@ -28,10 +28,31 @@ const DEFAULT_SETTINGS: Settings = {
   fontSize: 14,
   fontFamily: "'JetBrains Mono', 'Cascadia Code', Consolas, monospace",
   theme: 'dark',
+  lineHeight: 1.25,
+  cursorStyle: 'bar',
+  cursorBlink: true,
+  scrollback: 10000,
+  copyOnSelect: false,
+  rightClickAction: 'paste',
+  pasteLineBreakGuard: true,
+  trimPaste: true,
+  bellStyle: 'off',
+  shiftEnterNewline: true,
+  sshKeepaliveInterval: 15000,
+  sshKeepaliveCountMax: 4,
+  sshReadyTimeout: 20000,
   groups: ['默认'],
   agentProfiles: DEFAULT_PROFILES,
   claudeStrictMcp: false,
   showHiddenFiles: false
+}
+
+/**
+ * Fills in keys added by newer versions so an old settings.json never leaves
+ * the renderer with `undefined` for a field it renders.
+ */
+function withDefaults(raw: Partial<Settings> | undefined): Settings {
+  return { ...structuredClone(DEFAULT_SETTINGS), ...(raw ?? {}) }
 }
 
 interface SecretsFile {
@@ -98,7 +119,7 @@ export class SessionStore {
     try {
       if (existsSync(this.settingsFile)) {
         const raw = JSON.parse(readFileSync(this.settingsFile, 'utf8'))
-        this.settings = { ...DEFAULT_SETTINGS, ...raw }
+        this.settings = withDefaults(raw)
         if (!Array.isArray(this.settings.agentProfiles) || !this.settings.agentProfiles.length) {
           this.settings.agentProfiles = structuredClone(DEFAULT_PROFILES)
         }
@@ -258,7 +279,7 @@ export class SessionStore {
   }
 
   async saveSettings(patch: Partial<Settings>): Promise<Settings> {
-    this.settings = { ...this.settings, ...patch }
+    this.settings = withDefaults({ ...this.settings, ...patch })
     if (!Array.isArray(this.settings.agentProfiles)) {
       this.settings.agentProfiles = structuredClone(DEFAULT_PROFILES)
     }

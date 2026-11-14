@@ -4,8 +4,9 @@ import { WebLinksAddon } from '@xterm/addon-web-links'
 import { Terminal } from '@xterm/xterm'
 import { useEffect, useRef } from 'react'
 import type { AgentSession } from '@shared/types'
-import { agentTerminalTheme } from '../lib/termTheme'
-import { useAppStore } from '../state/store'
+import { interceptNativePaste } from '../lib/paste'
+import { applyTerminalAppearance, terminalAppearance } from '../lib/terminalOptions'
+import { resolveTheme, useAppStore } from '../state/store'
 
 interface AgentTerminalProps {
   runtime: AgentSession
@@ -50,14 +51,8 @@ export function AgentTerminal({ runtime, visible }: AgentTerminalProps) {
     const agentSessionId = runtime.agentSessionId
 
     const term = new Terminal({
-      fontFamily: settings.fontFamily,
-      fontSize: settings.fontSize,
-      lineHeight: 1.2,
-      cursorBlink: true,
-      cursorStyle: 'bar',
-      scrollback: 5000,
-      allowProposedApi: true,
-      theme: agentTerminalTheme(settings.theme)
+      ...terminalAppearance(settings, resolveTheme(settings.theme), true),
+      allowProposedApi: true
     })
     const fit = new FitAddon()
     const unicode = new Unicode11Addon()
@@ -81,17 +76,40 @@ export function AgentTerminal({ runtime, visible }: AgentTerminalProps) {
     term.attachCustomKeyEventHandler((event) => {
       if (event.type !== 'keydown') return true
       const mod = event.ctrlKey || event.metaKey
+      if (event.shiftKey && !mod && event.code === 'Enter') {
+        if (!useAppStore.getState().settings.shiftEnterNewline) return true
+        event.preventDefault()
+        void window.aishell.agent.input(agentSessionId, '\x1b\r')
+        return false
+      }
       if (mod && event.shiftKey && event.code === 'KeyC') {
         const selection = term.getSelection()
         if (selection) void window.aishell.clipboard.writeText(selection)
         return false
       }
-      // Ctrl+Shift+V is handled natively by xterm's textarea paste event.
       return true
     })
+    // Pasting a whole block into an agent prompt is easy to do by accident;
+    // the same trim/guard preferences apply here as in the SSH terminal.
+    const stopPasteIntercept = interceptNativePaste(term)
 
     const inputDisposable = term.onData((data) => {
       void window.aishell.agent.input(agentSessionId, data)
+    })
+
+    let lastCopied = ''
+    const selectionDisposable = term.onSelectionChange(() => {
+      if (!useAppStore.getState().settings.copyOnSelect) return
+      const selection = term.getSelection()
+      if (!selection || selection === lastCopied) return
+      lastCopied = selection
+      void window.aishell.clipboard.writeText(selection)
+    })
+
+    // A bell while the agent works usually means it needs attention.
+    const bellDisposable = term.onBell(() => {
+      if (useAppStore.getState().settings.bellStyle === 'off') return
+      useAppStore.getState().pushToast('info', 'Agent 需要你的注意')
     })
 
     const unsubData = window.aishell.on('agent:data', (event) => {
@@ -138,7 +156,10 @@ export function AgentTerminal({ runtime, visible }: AgentTerminalProps) {
       clearTimeout(timer)
       observer.disconnect()
       if (syncSizeRef.current === syncSize) syncSizeRef.current = null
+      stopPasteIntercept()
       inputDisposable.dispose()
+      selectionDisposable.dispose()
+      bellDisposable.dispose()
       unsubData()
       unsubExit()
       term.dispose()
@@ -146,13 +167,17 @@ export function AgentTerminal({ runtime, visible }: AgentTerminalProps) {
       fitRef.current = null
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [runtime.agentSessionId, settings.fontFamily, settings.fontSize])
+  }, [runtime.agentSessionId])
 
   useEffect(() => {
     const term = termRef.current
     if (!term) return
-    term.options.theme = agentTerminalTheme(settings.theme)
-  }, [settings.theme])
+    applyTerminalAppearance(
+      term,
+      terminalAppearance(settings, resolveTheme(settings.theme), true),
+      () => setTimeout(() => syncSizeRef.current?.(), 20)
+    )
+  }, [settings])
 
   return <div ref={containerRef} className="absolute inset-0" />
 }

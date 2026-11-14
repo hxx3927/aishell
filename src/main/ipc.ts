@@ -3,7 +3,8 @@ import { existsSync, promises as fsp } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import type { AuditQuery, LocalEntry, SessionInput, Settings } from '@shared/types'
-import { applyThemeChrome } from './theme'
+import { applyThemeChrome, resolveTheme } from './theme'
+import { probeAgent } from './agents/probe'
 import type { SessionStore } from './store/SessionStore'
 import type { SshManager } from './ssh/SshManager'
 import type { AgentManager } from './agents/AgentManager'
@@ -170,6 +171,7 @@ export function registerIpc(deps: Deps): void {
     (_e, sessionId: string, profileId: string, name?: string, cols?: number, rows?: number) =>
       agents.launch(sessionId, profileId, name, cols, rows)
   )
+  ipcMain.handle('agent:probe', (_e, command: string) => probeAgent(command))
   ipcMain.handle('agent:list', (_e, sessionId: string) => agents.list(sessionId))
   ipcMain.handle(
     'agent:resume',
@@ -248,9 +250,34 @@ export function registerIpc(deps: Deps): void {
 
   ipcMain.handle('settings:save', async (_e, patch: Partial<Settings>) => {
     const settings = await store.saveSettings(patch)
-    if (patch.theme) applyThemeChrome(patch.theme)
+    if (patch.theme) {
+      const resolved = resolveTheme(patch.theme)
+      applyThemeChrome(resolved)
+      // Other windows (there is only one today) still need to repaint.
+      for (const win of BrowserWindow.getAllWindows()) {
+        if (!win.isDestroyed()) win.webContents.send('theme:changed', { resolved })
+      }
+    }
     if (patch.auditRetentionDays !== undefined) void audit.prune().catch(() => 0)
     return settings
+  })
+  ipcMain.handle('shell:openDataDir', async () => {
+    const error = await shell.openPath(store.dir)
+    return error || null
+  })
+  ipcMain.handle('shell:copyDiagnostics', () => {
+    const settings = store.getSettings()
+    clipboard.writeText(
+      [
+        `AIShell ${app.getVersion()}`,
+        `Electron ${process.versions.electron}  Node ${process.versions.node}`,
+        `Platform ${process.platform} ${process.arch}`,
+        `MCP ${mcp.getPort() ?? '未启动'}`,
+        `Theme ${settings.theme} · Font ${settings.fontFamily} ${settings.fontSize}px`,
+        `Data ${store.dir}`
+      ].join('\n')
+    )
+    return true
   })
   ipcMain.handle('hosts:remove', (_e, key: string) => store.removeKnownHost(key))
 
